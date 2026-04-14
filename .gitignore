@@ -1,0 +1,17 @@
+# Private notes
+notes/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# Generated data outputs
+data/generated_patterns/
+data/captures/
+*.json
+
+# OS
+.DS_Store
+Thumbs.db

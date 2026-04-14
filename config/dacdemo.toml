@@ -1,0 +1,29 @@
+[firmware]
+fqbn   = "adafruit:samd:adafruit_itsybitsy_m0"
+sketch = "firmware/Arduino_DAC_framework"
+
+[hardware]
+port = "COM5"
+baudrate = 115200
+
+[dac]
+f_out = 266.24e6
+f_sample = 5.24288e9
+num_samples = 256
+
+[rails]
+AVDD = 0.88
+AVDD0P85 = 0.88
+AVDD18 = 1.8
+DVDD = 0.88
+VCM = 0.65
+
+[coherent_tone]
+fs_app = 1000.0
+multiplier = 1e6
+n = 256
+x_seed = 4
+
+[paths]
+sine_output = "data/generated_patterns/sine_codes.json"
+coherent_tone_plan = "data/coherent_tone_plan.json"

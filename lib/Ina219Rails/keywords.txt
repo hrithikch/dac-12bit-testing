@@ -1,0 +1,2 @@
+MyClass	KEYWORD1
+myFunction	KEYWORD2
