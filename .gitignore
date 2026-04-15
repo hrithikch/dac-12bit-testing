@@ -12,6 +12,9 @@ data/generated_patterns/
 data/captures/
 *.json
 
+# Instrument reference documents (large PDFs — keep local only)
+instrument_comms/signal_analyzer/X-SeriesSignalAnalyzers_User_and_Programming_ref.pdf
+
 # OS
 .DS_Store
 Thumbs.db

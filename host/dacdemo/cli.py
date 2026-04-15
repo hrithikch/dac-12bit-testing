@@ -10,6 +10,7 @@ from dacdemo.board_control import BoardSession, list_ports
 from dacdemo.coherent_tone import build_plan
 from dacdemo.sine_gen import generate_sine_codes
 from dacdemo import config as _config
+from dacdemo.config import set_dac_freq, set_f_sample, set_coherent_params
 
 ADAFRUIT_VID = 0x239A
 
@@ -100,17 +101,34 @@ def cmd_health(args):
 
 
 def cmd_calc(args):
+    from dacdemo.coherent_tone import find_coherent_bin
+
     cfg = _cfg()
-    ct = cfg["coherent_tone"]
+    ct  = cfg["coherent_tone"]
+    dac = cfg["dac"]
+
     fs_app = args.fs_app or ct["fs_app"]
-    multiplier = args.multiplier or ct["multiplier"]
-    n = args.n or ct["n"]
+    n      = dac["num_samples"]          # single source of truth — not duplicated in [coherent_tone]
     x_seed = args.x_seed or ct["x_seed"]
-    plan = build_plan(fs_app=fs_app, multiplier=multiplier, n=n, x_seed=x_seed)
+    fin    = ct["fin"]
+
+    if args.from_fout is not None:
+        # Back-calculation: find the prime bin closest to the desired f_out,
+        # then update [coherent_tone] so the forward calc produces consistent state.
+        fs_actual_current = build_plan(fs_app=fs_app, n=n, x_seed=x_seed, fin=fin).fs_actual
+        x_seed, fin = find_coherent_bin(args.from_fout, fs_actual_current, n)
+        set_coherent_params(x_seed, fin)
+        print(f"Back-calc: x_seed={x_seed}, fin={fin!r}  (target {args.from_fout/1e6:.4f} MHz)")
+
+    plan = build_plan(fs_app=fs_app, n=n, x_seed=x_seed, fin=fin)
     print(json.dumps(plan.__dict__, indent=2))
+
     output_path = Path(cfg["paths"]["coherent_tone_plan"])
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(plan.__dict__, indent=2))
+
+    set_dac_freq(f_out=plan.f_out, f_sample=plan.fs_actual)
+    print(f"config updated: f_out={plan.f_out/1e6:.4f} MHz, f_sample={plan.fs_actual/1e9:.6f} GHz")
     print(output_path)
 
 
@@ -165,6 +183,122 @@ def cmd_run_demo(args):
         sess.close()
 
 
+# ---------------------------------------------------------------------------
+# Instrument commands
+# ---------------------------------------------------------------------------
+
+def _coherent_tone_summary(f_sample: float, num_samples: int, ct_cfg: dict) -> None:
+    """Print coherent f_out options for the given f_sample, marking the active bin."""
+    from dacdemo.coherent_tone import nearest_prime_bins
+    bins = nearest_prime_bins(ct_cfg["x_seed"])
+    active_fin = ct_cfg["fin"]
+    active_bin = bins[0] if active_fin == "low" else bins[-1]
+    for b in bins:
+        f = b * f_sample / num_samples
+        marker = "  <-- active (fin=" + active_fin + ")" if b == active_bin else ""
+        print(f"    bin {b:3d}  ->  f_out = {f / 1e6:.4f} MHz{marker}")
+
+
+def cmd_set_siggen(args):
+    """
+    Set the R&S SMA100B to the DAC sample clock frequency.
+
+    If --freq is supplied, f_sample is updated in config and the coherent
+    tone frequencies for the new f_sample are printed so the user knows
+    which f_out values remain valid. Run 'dacdemo calc' afterwards if you
+    need to regenerate the full coherent tone plan.
+    """
+    from dacdemo.siggen_control import SiggenSession
+
+    cfg = _cfg()
+    addr = cfg["instruments"]["siggen_addr"]
+    level_dbm = args.level if args.level is not None else cfg["instruments"]["siggen_level_dbm"]
+
+    if args.freq is not None:
+        set_f_sample(args.freq)
+        print(f"Config updated: f_sample = {args.freq / 1e9:.6f} GHz")
+        print("Valid coherent f_out values for new f_sample:")
+        _coherent_tone_summary(args.freq, cfg["dac"]["num_samples"], cfg["coherent_tone"])
+        print("  (Run 'dacdemo calc' to regenerate the full coherent tone plan.)\n")
+
+    f_sample = args.freq or cfg["dac"]["f_sample"]
+
+    with SiggenSession(addr) as sg:
+        if args.off:
+            sg.rf_off()
+        else:
+            sg.set_clock(f_sample, level_dbm)
+
+
+def cmd_capture(args):
+    """Capture ItsyBitsy SPI signals via AD3, decode, and optionally validate."""
+    from dacdemo.ad3_capture import run as ad3_run
+
+    cfg = _cfg()
+    output_dir = Path(args.output_dir) if args.output_dir else Path("data/captures")
+
+    result = ad3_run(
+        port=cfg["hardware"]["port"],
+        baudrate=cfg["hardware"]["baudrate"],
+        f_out=cfg["dac"]["f_out"],
+        f_sample=cfg["dac"]["f_sample"],
+        output_dir=output_dir,
+        validate=not args.no_validate,
+    )
+    if result["mismatches"]:
+        print(f"\n{len(result['mismatches'])} mismatch(es) detected.")
+    else:
+        print("\nCapture complete.")
+
+
+def cmd_scope_measure(args):
+    """Take measurements from the Keysight MSOS054A oscilloscope."""
+    from dacdemo.scope_control import ScopeSession, save_measurements_csv
+
+    cfg = _cfg()
+    addr = cfg["instruments"]["scope_addr"]
+    channel = args.channel or 1
+    output = Path(args.output) if args.output else Path("data/captures/scope_measurements.csv")
+
+    with ScopeSession(addr) as scope:
+        print(f"Connected: {scope.idn()}")
+        measurements = scope.measure(channel=channel)
+        for k, v in measurements.items():
+            print(f"  {k}: {v}")
+        save_measurements_csv(measurements, output)
+        if args.screenshot:
+            scope.screenshot(output.parent / "scope_screenshot.png")
+
+
+def cmd_sa_measure(args):
+    """Peak-power measurement on the Keysight N9010B EXA Signal Analyzer."""
+    from dacdemo.siganalyzer_control import SASession, save_measurements_csv
+
+    cfg = _cfg()
+    addr = cfg["instruments"]["sa_addr"]
+    center_hz = args.center or cfg["dac"]["f_out"]
+    span_hz   = args.span   or 2e6
+    rbw_hz    = args.rbw    or 10e3
+    vbw_hz    = args.vbw    or 10e3
+    ref_dbm   = args.ref    if args.ref is not None else 0.0
+    output    = Path(args.output) if args.output else Path("data/captures/sa_measurements.csv")
+
+    with SASession(addr) as sa:
+        print(f"Connected: {sa.idn()}")
+        measurements = sa.measure(
+            center_hz=center_hz,
+            span_hz=span_hz,
+            rbw_hz=rbw_hz,
+            vbw_hz=vbw_hz,
+            ref_level_dbm=ref_dbm,
+        )
+        for k, v in measurements.items():
+            print(f"  {k}: {v}")
+        save_measurements_csv(measurements, output)
+        if args.screenshot:
+            sa.screenshot(output.parent / "sa_screenshot.png")
+
+
 def build_parser():
     parser = argparse.ArgumentParser(prog="dacdemo")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -193,11 +327,17 @@ def build_parser():
     p.add_argument("--rails", nargs="+")
     p.set_defaults(func=cmd_health)
 
-    p = sub.add_parser("calc")
-    p.add_argument("--fs-app", type=float)
-    p.add_argument("--multiplier", type=float)
-    p.add_argument("--n", type=int)
-    p.add_argument("--x-seed", type=int)
+    p = sub.add_parser("calc",
+        help="Compute coherent tone plan and update [dac] f_sample + f_out in config")
+    p.add_argument("--fs-app", type=float,
+        metavar="HZ_APP",
+        help="Override fs_app (maps to f_sample via fixed 2^20 scale)")
+    p.add_argument("--x-seed", type=int,
+        metavar="N",
+        help="Override x_seed (prime bin search seed)")
+    p.add_argument("--from-fout", type=float,
+        metavar="HZ",
+        help="Back-calculate x_seed/fin from a desired f_out, then run forward calc")
     p.set_defaults(func=cmd_calc)
 
     p = sub.add_parser("gen-sine")
@@ -221,6 +361,55 @@ def build_parser():
     p.add_argument("--f-out", type=float)
     p.add_argument("--f-sample", type=float)
     p.set_defaults(func=cmd_run_demo)
+
+    p = sub.add_parser("set-siggen",
+        help="Set the R&S SMA100B to the DAC sample clock frequency")
+    p.add_argument("--freq", type=float,
+        metavar="HZ",
+        help="Override f_sample (Hz). Updates config and shows valid coherent f_out values.")
+    p.add_argument("--level", type=float,
+        metavar="DBM",
+        help="Output power in dBm (default: siggen_level_dbm from config)")
+    p.add_argument("--off", action="store_true",
+        help="Turn RF output off")
+    p.set_defaults(func=cmd_set_siggen)
+
+    p = sub.add_parser("capture",
+        help="Capture ItsyBitsy SPI signals via AD3 and decode to CSV")
+    p.add_argument("--no-validate", action="store_true",
+        help="Skip comparison against expected sine pattern")
+    p.add_argument("--output-dir",
+        metavar="PATH",
+        help="Output directory for CSV files (default: data/captures/)")
+    p.set_defaults(func=cmd_capture)
+
+    p = sub.add_parser("scope-measure",
+        help="Measure DAC analog output via Keysight MSOS054A")
+    p.add_argument("--channel", type=int, metavar="N",
+        help="Scope channel to measure (default: 1)")
+    p.add_argument("--screenshot", action="store_true",
+        help="Also save a PNG screenshot")
+    p.add_argument("--output", metavar="PATH",
+        help="Output CSV path (default: data/captures/scope_measurements.csv)")
+    p.set_defaults(func=cmd_scope_measure)
+
+    p = sub.add_parser("sa-measure",
+        help="Peak-power measurement via Keysight N9010B EXA Signal Analyzer")
+    p.add_argument("--center", type=float, metavar="HZ",
+        help="Center frequency in Hz (default: dac.f_out from config)")
+    p.add_argument("--span", type=float, metavar="HZ",
+        help="Frequency span in Hz (default: 2e6)")
+    p.add_argument("--rbw", type=float, metavar="HZ",
+        help="Resolution bandwidth in Hz (default: 10e3)")
+    p.add_argument("--vbw", type=float, metavar="HZ",
+        help="Video bandwidth in Hz (default: 10e3)")
+    p.add_argument("--ref", type=float, metavar="DBM",
+        help="Reference level in dBm (default: 0.0)")
+    p.add_argument("--screenshot", action="store_true",
+        help="Also save a PNG screenshot")
+    p.add_argument("--output", metavar="PATH",
+        help="Output CSV path (default: data/captures/sa_measurements.csv)")
+    p.set_defaults(func=cmd_sa_measure)
 
     return parser
 
