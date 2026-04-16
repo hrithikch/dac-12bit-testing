@@ -48,7 +48,6 @@ class SASession:
     def _init(self) -> None:
         self._res.clear()
         self._drv.clear_status()
-        self._drv.turn_off_system_header()
 
     def measure(
         self,

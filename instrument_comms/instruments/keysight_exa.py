@@ -34,9 +34,6 @@ class KeysightEXA:
     def preset(self) -> None:
         self.do_command("*RST")
 
-    def turn_off_system_header(self) -> None:
-        self.do_command(":SYSTem:HEADer 0")
-
     # ------------------------------------------------------------------
     # Spectrum Analyzer setup
     # ------------------------------------------------------------------

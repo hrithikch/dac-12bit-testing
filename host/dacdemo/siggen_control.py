@@ -22,7 +22,7 @@ class SiggenSession:
 
     Usage:
         with SiggenSession(addr) as sg:
-            sg.set_clock(5.24288e9, level_dbm=0)
+            sg.set_clock(5.24288e9, level="700 mV")
     """
 
     def __init__(self, addr: str, timeout_ms: int = 50_000) -> None:
@@ -37,19 +37,19 @@ class SiggenSession:
     def __exit__(self, *_):
         self.close()
 
-    def set_clock(self, freq_hz: float, level_dbm: float = 0.0) -> None:
+    def set_clock(self, freq_hz: float, level: str = "700 mV") -> None:
         """
         Configure the signal generator as a fixed-frequency DAC sample clock.
 
         Sets CW mode, applies frequency and power level, then enables RF output.
-        freq_hz   : DAC sample clock frequency in Hz (e.g. 5.24288e9)
-        level_dbm : output power in dBm (default 0)
+        freq_hz : DAC sample clock frequency in Hz (e.g. 5.24288e9)
+        level   : output level string with units, e.g. "0 dBm" or "700 mV"
         """
         self._sg.set_continuous_wave_mode()
         self._sg.set_frequency(freq_hz)
-        self._sg.set_level(f"{level_dbm} dBm")
+        self._sg.set_level(level)
         self._sg.turn_rf_on()
-        print(f"Siggen: {freq_hz / 1e9:.6f} GHz  {level_dbm:+.1f} dBm  RF ON")
+        print(f"Siggen: {freq_hz / 1e9:.6f} GHz  {level}  RF ON")
 
     def rf_off(self) -> None:
         """Disable RF output without closing the VISA connection."""

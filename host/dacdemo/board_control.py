@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import serial
 import serial.tools.list_ports
 
-from dacdemo.serial_utils import NAMES, read_status_frame
+from dacdemo.serial_utils import NAMES, read_exact, read_status_frame
 
 
 @dataclass
@@ -20,13 +20,18 @@ class BoardSession:
         ser.timeout = read_timeout_s
         ser.open()
         time.sleep(startup_delay_s)
+        ser.reset_input_buffer()
+        ser.reset_output_buffer()
         return cls(ser=ser)
 
     def close(self):
         self.ser.close()
 
     def write_text(self, command: str):
+        # Drop any stale bytes from an earlier timed-out transaction before issuing a new command.
+        self.ser.reset_input_buffer()
         self.ser.write(command.encode("utf-8"))
+        self.ser.flush()
 
     def read_bool(self) -> bool:
         data = self.ser.read(1)
@@ -35,10 +40,10 @@ class BoardSession:
         return bool(data[0])
 
     def read_u16(self) -> int:
-        return struct.unpack("<H", self.ser.read(2))[0]
+        return struct.unpack("<H", read_exact(self.ser, 2))[0]
 
     def read_f32(self) -> float:
-        return struct.unpack("<f", self.ser.read(4))[0]
+        return struct.unpack("<f", read_exact(self.ser, 4))[0]
 
     def led_on(self) -> bool:
         self.write_text("ON")
@@ -92,8 +97,14 @@ class BoardSession:
         parts = ["SET_VOLTAGE"]
         for rail, value in rail_to_value.items():
             parts.extend([rail, str(value)])
-        self.write_text(",".join(parts))
-        statuses = read_status_frame(self.ser)
+        previous_timeout = self.ser.timeout
+        # Rail convergence can legitimately take well over the default read timeout.
+        self.ser.timeout = max(previous_timeout or 0, 20.0)
+        try:
+            self.write_text(",".join(parts))
+            statuses = read_status_frame(self.ser)
+        finally:
+            self.ser.timeout = previous_timeout
         return [NAMES.get(s, f"UNKNOWN({s})") for s in statuses]
 
     def dac_disable_pattern(self) -> bool:

@@ -24,10 +24,10 @@ x_seed = 4
 fin    = "low"    # "low" or "high" — which prime bin sets f_out
 
 [instruments]
-siggen_addr = "TCPIP0::192.168.1.101::inst0::INSTR"   # R&S SMA100B (VXI-11) — update IP
-scope_addr  = "TCPIP0::192.168.1.100::hislip0::INSTR"  # Keysight MSOS054A (HiSLIP) — update IP
-sa_addr     = "TCPIP0::192.168.1.102::hislip0::INSTR"  # Keysight N9010B EXA (HiSLIP) — update IP
-siggen_level_dbm = 0.0
+siggen_addr = "TCPIP0::192.168.10.159::hislip0::INSTR"   # R&S SMA100B (HiSLIP)
+scope_addr  = "TCPIP0::S254A-1246709::hislip0::INSTR"  # Keysight MSOS054A (HiSLIP) — update IP
+sa_addr     = "TCPIP0::K-N9010B-00524::hislip0::INSTR"  # Keysight N9010B EXA (HiSLIP) — update IP
+siggen_level = "700 mV"
 
 [paths]
 sine_output = "data/generated_patterns/sine_codes.json"
