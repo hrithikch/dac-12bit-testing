@@ -71,6 +71,24 @@ Run this once after plugging in, or any time you change USB ports.
 
 ---
 
+## 2. Auto-detect instrument addresses and save to config
+
+```
+dacdemo detect-instruments
+```
+
+Queries the VISA resource manager for the R&S SMA100B signal generator, Keysight N9010B EXA signal analyzer, and Keysight oscilloscope. Identifies each by IDN and writes `siggen_addr`, `sa_addr`, and `scope_addr` directly into `config/dacdemo.toml`. If the same instrument appears under multiple VISA resources, duplicates are removed automatically. If multiple distinct instruments of the same type are found, you are prompted to pick one.
+
+```
+dacdemo detect-instruments --subnet 192.168.10
+```
+
+Also scans the given LAN subnet for instruments not yet registered in the VISA resource manager.
+
+Run this once when setting up a new bench, or any time an instrument changes IP address.
+
+---
+
 ## 2. No-hardware checks (run any time)
 
 ```
@@ -191,8 +209,6 @@ Reads `f_out` and `f_sample` from `[dac]`. Pass `--f-out` / `--f-sample` to over
 
 ## 8. Signal generator (R&S SMA100B over LAN)
 
-Update the IP address in `config/dacdemo.toml` `[instruments]` before using.
-
 ```
 dacdemo set-siggen
 ```
@@ -253,8 +269,6 @@ The same logic runs as a standalone script: `python tools/capture_validate.py`
 
 ## 10. Oscilloscope measurements (Keysight MSOS054A over LAN)
 
-Update the IP address in `config/dacdemo.toml` `[instruments]` before using.
-
 ```
 dacdemo scope-measure
 ```
@@ -281,8 +295,6 @@ Write measurements CSV to a custom path.
 ---
 
 ## 11. Signal Analyzer measurements (Keysight N9010B EXA over LAN)
-
-Update `sa_addr` in `config/dacdemo.toml` `[instruments]` before using.
 
 ```
 dacdemo sa-measure

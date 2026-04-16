@@ -72,6 +72,42 @@ def set_fs_app(fs_app: float, path: Path = _DEFAULT_CONFIG_PATH) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def set_siggen_addr(addr: str, path: Path = _DEFAULT_CONFIG_PATH) -> None:
+    """Replace siggen_addr in [instruments] in-place, preserving all comments."""
+    text = path.read_text(encoding="utf-8")
+    updated = re.sub(
+        r'^(siggen_addr\s*=\s*)".+"',
+        rf'\g<1>"{addr}"',
+        text,
+        flags=re.MULTILINE,
+    )
+    path.write_text(updated, encoding="utf-8")
+
+
+def set_sa_addr(addr: str, path: Path = _DEFAULT_CONFIG_PATH) -> None:
+    """Replace sa_addr in [instruments] in-place, preserving all comments."""
+    text = path.read_text(encoding="utf-8")
+    updated = re.sub(
+        r'^(sa_addr\s*=\s*)".+"',
+        rf'\g<1>"{addr}"',
+        text,
+        flags=re.MULTILINE,
+    )
+    path.write_text(updated, encoding="utf-8")
+
+
+def set_scope_addr(addr: str, path: Path = _DEFAULT_CONFIG_PATH) -> None:
+    """Replace scope_addr in [instruments] in-place, preserving all comments."""
+    text = path.read_text(encoding="utf-8")
+    updated = re.sub(
+        r'^(scope_addr\s*=\s*)".+"',
+        rf'\g<1>"{addr}"',
+        text,
+        flags=re.MULTILINE,
+    )
+    path.write_text(updated, encoding="utf-8")
+
+
 def set_coherent_params(x_seed: int, fin: str, path: Path = _DEFAULT_CONFIG_PATH) -> None:
     """Update x_seed and fin in [coherent_tone] in-place."""
     text = path.read_text(encoding="utf-8")

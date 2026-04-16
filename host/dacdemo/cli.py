@@ -10,7 +10,7 @@ from dacdemo.board_control import BoardSession, list_ports
 from dacdemo.coherent_tone import build_plan
 from dacdemo.sine_gen import generate_sine_codes
 from dacdemo import config as _config
-from dacdemo.config import set_dac_freq, set_f_sample, set_coherent_params
+from dacdemo.config import set_dac_freq, set_f_sample, set_coherent_params, set_siggen_addr, set_sa_addr, set_scope_addr
 
 ADAFRUIT_VID = 0x239A
 
@@ -62,6 +62,100 @@ def cmd_detect_port(_args):
     port = matches[0].device
     _config.set_port(port)
     print(f"Detected {matches[0].description} on {port} — config updated.")
+
+
+def cmd_detect_instruments(args):
+    """
+    Discover the signal generator, signal analyzer, and oscilloscope and
+    update their addresses in config.
+    """
+    import time
+    from dacdemo.discover import discover_via_visa, scan_subnet, visa_string_hint
+
+    all_results = []
+    t0 = time.time()
+
+    print("\n--- VISA Resource Manager ---")
+    all_results += discover_via_visa(timeout_ms=args.visa_timeout)
+
+    if args.subnet:
+        parts = args.subnet.split(".")
+        if len(parts) != 3 or not all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+            sys.exit(f"ERROR: --subnet must be three octets, e.g. 192.168.10  (got '{args.subnet}')")
+        print("\n--- LAN Subnet Scan ---")
+        all_results += scan_subnet(
+            subnet=args.subnet,
+            connect_timeout=args.timeout,
+            max_workers=args.threads,
+            visa_timeout_ms=args.visa_timeout,
+        )
+
+    def _visa_addr(inst):
+        return inst.address if inst.source == "VISA" else (visa_string_hint(inst) or inst.address)
+
+    def _dedup(matches):
+        """Drop duplicates where two entries report the same IDN (same physical instrument)."""
+        seen, result = set(), []
+        for inst in matches:
+            key = inst.idn if inst.idn else id(inst)
+            if key not in seen:
+                seen.add(key)
+                result.append(inst)
+        return result
+
+    def _pick(matches, display_name):
+        """Return chosen DiscoveredInstrument or None."""
+        matches = _dedup(matches)
+        if not matches:
+            print(f"  WARNING: no {display_name} found — skipping.")
+            return None
+        if len(matches) == 1:
+            return matches[0]
+        print(f"\n  Multiple {display_name}s found:")
+        for i, inst in enumerate(matches):
+            print(f"    [{i + 1}] {_visa_addr(inst)}  —  {inst.idn}")
+        while True:
+            try:
+                idx = int(input(f"  Select {display_name} number: ")) - 1
+                if 0 <= idx < len(matches):
+                    return matches[idx]
+            except (ValueError, KeyboardInterrupt):
+                pass
+            print(f"  Please enter a number between 1 and {len(matches)}.")
+
+    targets = [
+        (
+            lambda inst: inst.label and "SMA100" in inst.label.upper(),
+            "R&S SMA100B signal generator",
+            set_siggen_addr,
+        ),
+        (
+            lambda inst: inst.label and "N9010B" in inst.label.upper(),
+            "Keysight N9010B signal analyzer",
+            set_sa_addr,
+        ),
+        (
+            lambda inst: inst.label and ("MSO" in inst.label.upper() or "MXR" in inst.label.upper()),
+            "Keysight oscilloscope",
+            set_scope_addr,
+        ),
+    ]
+
+    print()
+    any_updated = False
+    for match_fn, display_name, setter in targets:
+        matches = [inst for inst in all_results if match_fn(inst)]
+        chosen = _pick(matches, display_name)
+        if chosen is not None:
+            addr = _visa_addr(chosen)
+            setter(addr)
+            print(f"  {display_name}: {addr} — config updated.")
+            any_updated = True
+
+    if not any_updated:
+        print("No recognized instruments found. Is the network/VISA connection up?")
+
+    print(f"\nDiscovery completed in {time.time() - t0:.1f} s")
 
 
 def cmd_bias(args):
@@ -212,7 +306,13 @@ def cmd_set_siggen(args):
 
     cfg = _cfg()
     addr = cfg["instruments"]["siggen_addr"]
-    level_dbm = args.level if args.level is not None else cfg["instruments"]["siggen_level_dbm"]
+    instruments_cfg = cfg["instruments"]
+    if args.level is not None:
+        level = args.level
+    elif "siggen_level" in instruments_cfg:
+        level = instruments_cfg["siggen_level"]
+    else:
+        level = f'{instruments_cfg["siggen_level_dbm"]} dBm'
 
     if args.freq is not None:
         set_f_sample(args.freq)
@@ -227,7 +327,7 @@ def cmd_set_siggen(args):
         if args.off:
             sg.rf_off()
         else:
-            sg.set_clock(f_sample, level_dbm)
+            sg.set_clock(f_sample, level)
 
 
 def cmd_capture(args):
@@ -270,6 +370,40 @@ def cmd_scope_measure(args):
             scope.screenshot(output.parent / "scope_screenshot.png")
 
 
+def cmd_discover(args):
+    """Scan for VISA instruments and (optionally) a LAN subnet."""
+    import time
+    from dacdemo.discover import (
+        discover_via_visa, scan_subnet, discover_analog_discovery, print_results,
+    )
+
+    all_results = []
+    t0 = time.time()
+
+    if not args.skip_visa:
+        print("\n--- VISA Resource Manager ---")
+        all_results += discover_via_visa(timeout_ms=args.visa_timeout)
+
+    if args.subnet:
+        parts = args.subnet.split(".")
+        if len(parts) != 3 or not all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+            sys.exit(f"ERROR: --subnet must be three octets, e.g. 192.168.1  (got '{args.subnet}')")
+        print("\n--- LAN Subnet Scan ---")
+        all_results += scan_subnet(
+            subnet=args.subnet,
+            connect_timeout=args.timeout,
+            max_workers=args.threads,
+            visa_timeout_ms=args.visa_timeout,
+        )
+
+    if not args.skip_ad2:
+        print("\n--- Analog Discovery ---")
+        all_results += discover_analog_discovery()
+
+    print_results(all_results)
+    print(f"Discovery completed in {time.time() - t0:.1f} s")
+
+
 def cmd_sa_measure(args):
     """Peak-power measurement on the Keysight N9010B EXA Signal Analyzer."""
     from dacdemo.siganalyzer_control import SASession, save_measurements_csv
@@ -308,6 +442,18 @@ def build_parser():
 
     p = sub.add_parser("detect-port")
     p.set_defaults(func=cmd_detect_port)
+
+    p = sub.add_parser("detect-instruments",
+        help="Discover signal generator, signal analyzer, and oscilloscope; update config addresses")
+    p.add_argument("--subnet", metavar="A.B.C",
+        help="Also scan this subnet for LAN instruments (e.g. 192.168.10)")
+    p.add_argument("--timeout", type=float, default=0.5, metavar="SEC",
+        help="TCP connect timeout per host during LAN scan (default: 0.5 s)")
+    p.add_argument("--visa-timeout", type=int, default=5000, metavar="MS",
+        help="VISA IDN query timeout in milliseconds (default: 5000)")
+    p.add_argument("--threads", type=int, default=64,
+        help="Thread pool size for LAN scan (default: 64)")
+    p.set_defaults(func=cmd_detect_instruments)
 
     p = sub.add_parser("flash")
     p.add_argument("--fqbn")
@@ -367,9 +513,9 @@ def build_parser():
     p.add_argument("--freq", type=float,
         metavar="HZ",
         help="Override f_sample (Hz). Updates config and shows valid coherent f_out values.")
-    p.add_argument("--level", type=float,
-        metavar="DBM",
-        help="Output power in dBm (default: siggen_level_dbm from config)")
+    p.add_argument("--level",
+        metavar="LEVEL",
+        help='Output level with units, e.g. "700 mV" or "0 dBm" (default: siggen_level from config)')
     p.add_argument("--off", action="store_true",
         help="Turn RF output off")
     p.set_defaults(func=cmd_set_siggen)

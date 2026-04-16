@@ -58,13 +58,19 @@ dacdemo run-demo --initialize-compliance
 
 ## Instruments
 
+**`dacdemo detect-instruments`**
+Finds the R&S SMA100B signal generator, Keysight N9010B EXA signal analyzer, and Keysight oscilloscope via VISA, and writes their addresses directly to `config/dacdemo.toml`. Run once when setting up a new bench, or any time an instrument changes IP address.
+```
+dacdemo detect-instruments                    # VISA only
+dacdemo detect-instruments --subnet 192.168.10  # also scan LAN
+```
+
 **`dacdemo set-siggen`**
 Connects to the R&S SMA100B over LAN, sets CW mode, applies `f_sample` from `[dac]` as the DAC clock frequency, enables RF output.
 ```
 dacdemo set-siggen --level -10   # override power (dBm)
 dacdemo set-siggen --off         # turn RF off
 ```
-Update `siggen_addr` in `[instruments]` config with the actual IP before use.
 
 **`dacdemo capture`**
 Arms the AD3 logic analyzer (hardware trigger on `SPI_SCAN` rising edge), runs the DAC demo over serial, captures the full SPI transaction, decodes the 20-bit control word and 256×12-bit sine data, validates against expected pattern. Saves `capture_raw.csv` and `decoded_words.csv` to `data/captures/`.
@@ -78,14 +84,12 @@ Connects to the Keysight MSOS054A over LAN, runs standard measurements on CH1 (f
 ```
 dacdemo scope-measure --channel 2 --screenshot
 ```
-Update `scope_addr` in `[instruments]` config with the actual IP before use.
 
 **`dacdemo sa-measure`**
 Connects to the Keysight N9010B EXA Signal Analyzer over LAN, configures a spectrum view centered on `dac.f_out` (2 MHz span, 10 kHz RBW/VBW), runs one sweep, places a peak marker, and appends a timestamped row to `data/captures/sa_measurements.csv`.
 ```
 dacdemo sa-measure --center 12.288e6 --span 5e6 --screenshot
 ```
-Update `sa_addr` in `[instruments]` config with the actual IP before use.
 
 ---
 

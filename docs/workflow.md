@@ -18,9 +18,7 @@
 5. Compute or choose sine parameters on host
 6. Command the firmware to generate and load the sine pattern
 7. Enable playback
-
-## Future extension
-Recommended additions:
-- `capture-scope` command
-- `configure-siggen` command
-- `run-full-demo` command for bias + playback + capture + save
+8. Set signal generator to DAC sample clock frequency
+9. Capture and validate SPI signals via AD3 logic analyzer
+10. Measure analog output on oscilloscope
+11. Measure RF spectrum on signal analyzer
