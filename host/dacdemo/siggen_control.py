@@ -57,8 +57,4 @@ class SiggenSession:
         print("Siggen: RF OFF")
 
     def close(self) -> None:
-        try:
-            self._sg.turn_rf_off()
-        except Exception:
-            pass
         self._rm.close()

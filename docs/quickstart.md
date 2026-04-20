@@ -91,6 +91,31 @@ Connects to the Keysight N9010B EXA Signal Analyzer over LAN, configures a spect
 dacdemo sa-measure --center 12.288e6 --span 5e6 --screenshot
 ```
 
+**`dacdemo sa-sfdr`**
+Single-tone SFDR measurement. SA window covers the full Nyquist band (center = `f_sample/4`, span = `f_sample/2`, RBW = 100 kHz). Places marker 1 on the fundamental and marker 2 on the worst spur. Appends to `data/captures/sa_sfdr.csv`.
+```
+dacdemo sa-sfdr
+```
+
+**`dacdemo sa-sfdr-sweep`**
+Sweeps the DAC output tone across a set of frequencies and records SFDR at each step. Frequency lists live in separate files under `config/sweeps/` (e.g. `config/sweeps/default.toml`). The active sweep is selected by name in `config/dacdemo.toml` under `[sweep] config`.
+
+```
+# Linear range on the command line:
+dacdemo sa-sfdr-sweep --freq-start 200e6 --freq-stop 500e6 --freq-step 50e6
+
+# Explicit list — snaps to prime bins and saves actuals to the active sweep file:
+dacdemo sa-sfdr-sweep --freqs 100e6 500e6 1e9 2e9
+
+# Use a named sweep preset:
+dacdemo sa-sfdr-sweep --sweep-config high_freq
+
+# Windowed mode — 4 sub-windows across the Nyquist band (better resolution at low frequencies):
+dacdemo sa-sfdr-sweep --windowed --sa-settle 1.5
+```
+
+Target frequencies snap to the nearest coherent prime bin. Duplicate bins are skipped. Output: `data/captures/sa_sfdr_sweep.csv` (12 columns including `tone_hz_target` and `sfdr_dbc`). Use `--windowed` when the fundamental tone falls below ~200 MHz and appears split across bins in wide-span mode. See `docs/command_reference.md` for full column list and options.
+
 ---
 
 ## Typical full sequence
@@ -101,5 +126,5 @@ dacdemo set-siggen                        # push f_sample to R&S clock generator
 dacdemo run-demo --initialize-compliance  # bias rails + load + enable DAC
 dacdemo capture                           # capture + decode + validate SPI
 dacdemo scope-measure                     # measure analog output on scope
-dacdemo sa-measure                        # measure RF spectrum on signal analyzer
+dacdemo sa-sfdr-sweep                     # sweep SFDR across frequency range
 ```

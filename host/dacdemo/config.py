@@ -15,7 +15,13 @@ _DEFAULT_CONFIG_PATH = Path(__file__).parents[2] / "config" / "dacdemo.toml"
 
 def load(path: Path = _DEFAULT_CONFIG_PATH) -> dict:
     with open(path, "rb") as f:
-        return tomllib.load(f)
+        cfg = tomllib.load(f)
+    sweep_name = cfg.get("sweep", {}).get("config", "default")
+    sweep_path = path.parent / "sweeps" / f"{sweep_name}.toml"
+    if sweep_path.exists():
+        with open(sweep_path, "rb") as f:
+            cfg["sweep"].update(tomllib.load(f))
+    return cfg
 
 
 def set_port(port: str, path: Path = _DEFAULT_CONFIG_PATH) -> None:
@@ -106,6 +112,34 @@ def set_scope_addr(addr: str, path: Path = _DEFAULT_CONFIG_PATH) -> None:
         flags=re.MULTILINE,
     )
     path.write_text(updated, encoding="utf-8")
+
+
+def set_sweep_frequencies(frequencies: list, path: Path = _DEFAULT_CONFIG_PATH) -> None:
+    """Write frequencies to the currently active sweep config file."""
+    with open(path, "rb") as f:
+        cfg = tomllib.load(f)
+    sweep_name = cfg.get("sweep", {}).get("config", "default")
+    sweep_path = path.parent / "sweeps" / f"{sweep_name}.toml"
+    sweep_path.parent.mkdir(parents=True, exist_ok=True)
+    content = (
+        "# Sweep frequencies (Hz) — snapped to coherent prime bins\n"
+        "frequencies = [\n"
+        + "".join(f"    {f},\n" for f in frequencies)
+        + "]\n"
+    )
+    sweep_path.write_text(content, encoding="utf-8")
+
+
+def set_sweep_config(name: str, path: Path = _DEFAULT_CONFIG_PATH) -> None:
+    """Update the active sweep config name in [sweep] config."""
+    text = path.read_text(encoding="utf-8")
+    text = re.sub(
+        r'^(config\s*=\s*)".+"',
+        rf'\g<1>"{name}"',
+        text,
+        flags=re.MULTILINE,
+    )
+    path.write_text(text, encoding="utf-8")
 
 
 def set_coherent_params(x_seed: int, fin: str, path: Path = _DEFAULT_CONFIG_PATH) -> None:

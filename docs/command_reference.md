@@ -136,7 +136,7 @@ dacdemo calc --from-fout 61.44e6
 # f_sample + f_out written back to [dac]
 ```
 
-**Override fs_app on the command line (does not write to TOML):**
+**Override fs_app and write to TOML:**
 ```
 dacdemo calc --fs-app 5000
 ```
@@ -222,7 +222,7 @@ Override output level (dBm) for this run only.
 ```
 dacdemo set-siggen --freq 5.24288e9
 ```
-Override `f_sample` directly. Updates `f_sample` in `[dac]` config and prints the coherent `f_out` options for the new frequency. **Note:** this bypasses the `[coherent_tone]` derivation — run `dacdemo calc` afterwards to bring the full plan back into sync.
+Override `f_sample` directly. Updates `f_sample` in `[dac]` config and prints the coherent `f_out` options for the new frequency. Also back-calculates `fs_app` from the new frequency and writes it to `[coherent_tone]`, keeping both config sections in sync.
 
 ```
 dacdemo set-siggen --off
@@ -296,6 +296,8 @@ Write measurements CSV to a custom path.
 
 ## 11. Signal Analyzer measurements (Keysight N9010B EXA over LAN)
 
+### Peak power — `sa-measure`
+
 ```
 dacdemo sa-measure
 ```
@@ -327,3 +329,141 @@ Also save a PNG screenshot to `data/captures/sa_screenshot.png`.
 dacdemo sa-measure --output PATH
 ```
 Write measurements CSV to a custom path.
+
+---
+
+### Single-tone SFDR — `sa-sfdr`
+
+```
+dacdemo sa-sfdr
+```
+Measures SFDR at the current `dac.f_out`. Runs one sweep with the SA window fixed at the full Nyquist band (center = `f_sample/4`, span = `f_sample/2`, RBW = 100 kHz, VBW = 10 kHz), places marker 1 on the highest peak (fundamental) and marker 2 on the next-lower peak (worst spur). Appends a timestamped row to `data/captures/sa_sfdr.csv`.
+
+Measurements: `center_hz`, `span_hz`, `rbw_hz`, `vbw_hz`, `ref_level_dbm`, `fund_freq_hz`, `fund_amp_dbm`, `spur_freq_hz`, `spur_amp_dbm`, `sfdr_dbc`.
+
+If no second peak is found (instrument error 780), `spur_freq_hz`, `spur_amp_dbm`, and `sfdr_dbc` are written as `nan` — pandas reads these as `NaN` automatically.
+
+```
+dacdemo sa-sfdr --center 266e6 --span 500e6
+```
+Override the SA window for this run.
+
+```
+dacdemo sa-sfdr --screenshot --output PATH
+```
+Also save a PNG screenshot; write CSV to a custom path.
+
+---
+
+### SFDR frequency sweep — `sa-sfdr-sweep`
+
+Iterates the DAC output tone across a set of target frequencies, reprograms the DAC at each step, measures SFDR from the signal analyzer, and appends one row per step to a CSV.
+
+**Frequency quantization:** target frequencies snap to the nearest prime FFT bin: `tone_hz_actual = prime_bin × f_sample / num_samples`. The requested target and the actual frequency are both recorded in the CSV. Targets that map to the same prime bin are skipped.
+
+---
+
+#### Sweep config files
+
+Frequency lists live in `config/sweeps/` as individual TOML files. The active file is set by `[sweep] config` in `config/dacdemo.toml`:
+
+```toml
+# config/dacdemo.toml
+[sweep]
+config = "default"   # → loads config/sweeps/default.toml
+```
+
+```toml
+# config/sweeps/default.toml
+frequencies = [
+    225280000.0,
+    348160000.0,
+    471040000.0,
+]
+```
+
+Create as many sweep files as needed (`low_band.toml`, `nyquist_full.toml`, etc.) and switch between them with `--sweep-config`:
+
+```
+dacdemo sa-sfdr-sweep --sweep-config low_band
+```
+
+This updates `[sweep] config` in `dacdemo.toml` and runs immediately. Subsequent bare `dacdemo sa-sfdr-sweep` calls use whichever config was last set.
+
+---
+
+#### Specifying frequencies — three ways (evaluated in priority order)
+
+*Option 1 — linear range on the command line:*
+```
+dacdemo sa-sfdr-sweep --freq-start 200e6 --freq-stop 500e6 --freq-step 50e6
+```
+Generates targets `[200, 250, 300, …, 500]` MHz. All three arguments are required together. Does not modify any sweep config file.
+
+*Option 2 — arbitrary list on the command line:*
+```
+dacdemo sa-sfdr-sweep --freqs 200e6 266e6 400e6 471e6
+```
+Each target is snapped to the nearest coherent prime bin. Duplicates are dropped. The resulting actual frequencies are written to the currently active sweep config file (`config/sweeps/{config}.toml`) for reuse.
+
+*Option 3 — active sweep config file:*
+```
+dacdemo sa-sfdr-sweep
+dacdemo sa-sfdr-sweep --sweep-config low_band
+```
+When no frequency arguments are given, frequencies are read from the active sweep config file. Use `--sweep-config` to switch files.
+
+---
+
+#### Measurement modes
+
+**Standard (default):** one wide-span sweep per frequency point. SA window is fixed at the full Nyquist band (center = `f_sample/4`, span = `f_sample/2`).
+
+**Windowed (`--windowed`):** divides the Nyquist band into 4 equal sub-windows (each span = `f_sample/8`), runs one sweep per window, finds the highest peak in each, then computes SFDR from the two highest peaks across all windows. Provides 4× better frequency resolution at the same RBW — useful when a tone at a low frequency is split across adjacent bins in the wide-span view.
+
+```
+dacdemo sa-sfdr-sweep --windowed
+dacdemo sa-sfdr-sweep --windowed --sa-settle 2.0
+```
+
+The `--sa-settle` delay is inserted between configuring each SA window and triggering the sweep, giving the trace time to stabilize after a window change. Distinct from `--settle` (DAC settling after a frequency hop).
+
+---
+
+#### Output CSV
+
+| Column | Description |
+|---|---|
+| `timestamp` | ISO 8601 |
+| `tone_hz_target` | requested frequency (Hz) |
+| `center_hz` | SA window center (fixed Nyquist midpoint, or last window center in windowed mode) |
+| `span_hz` | SA window span |
+| `rbw_hz` | resolution bandwidth |
+| `vbw_hz` | video bandwidth |
+| `ref_level_dbm` | SA reference level |
+| `fund_freq_hz` | fundamental peak frequency |
+| `fund_amp_dbm` | fundamental peak amplitude |
+| `spur_freq_hz` | worst spur frequency (`nan` if no second peak found) |
+| `spur_amp_dbm` | worst spur amplitude (`nan` if no second peak found) |
+| `sfdr_dbc` | `fund_amp_dbm − spur_amp_dbm` (`nan` if no second peak found) |
+
+---
+
+#### Options
+
+| Option | Default | Notes |
+|---|---|---|
+| `--freq-start/stop/step` | — | Linear range; all three required if used |
+| `--freqs HZ [HZ ...]` | — | Arbitrary list; snapped to prime bins and saved to active sweep config |
+| `--sweep-config NAME` | — | Switch active sweep config to `config/sweeps/NAME.toml` |
+| `--windowed` | off | 4-window Nyquist measurement for higher resolution |
+| `--center` | `f_sample / 4` | Override SA window center (standard mode only) |
+| `--span` | `f_sample / 2` | Override SA window span (standard mode only) |
+| `--rbw` | `100e3` | Resolution bandwidth (Hz) |
+| `--vbw` | `10e3` | Video bandwidth (Hz) |
+| `--ref` | `0.0` | SA reference level (dBm) |
+| `--settle` | `0.5` | DAC settling time after reprogramming (s) |
+| `--sa-settle` | `1.0` | SA settle delay between window configure and sweep trigger (s) |
+| `--port` | config | Serial port override |
+| `--baudrate` | config | Baudrate override |
+| `--output` | `data/captures/sa_sfdr_sweep.csv` | Output CSV path |

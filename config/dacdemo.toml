@@ -32,3 +32,6 @@ siggen_level = "700 mV"
 [paths]
 sine_output = "data/generated_patterns/sine_codes.json"
 coherent_tone_plan = "data/coherent_tone_plan.json"
+
+[sweep]
+config = "default"   # name of the active sweep file in config/sweeps/

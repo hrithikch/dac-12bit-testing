@@ -69,11 +69,56 @@ class KeysightEXA:
         """Place marker 1 on the highest amplitude point in the trace."""
         self.do_command(":CALCulate:MARKer1:MAXimum")
 
+    def measure_peak(self) -> tuple:
+        """Place marker 1 at the highest peak. Returns (freq_hz, amp_dbm)."""
+        self.do_command(":CALCulate:MARKer1:MAXimum")
+        return (self.do_query_number(":CALCulate:MARKer1:X?"),
+                self.do_query_number(":CALCulate:MARKer1:Y?"))
+
     def get_marker_frequency_hz(self) -> float:
         return self.do_query_number(":CALCulate:MARKer1:X?")
 
     def get_marker_amplitude_dbm(self) -> float:
         return self.do_query_number(":CALCulate:MARKer1:Y?")
+
+    def measure_sfdr(self) -> dict:
+        """
+        Place marker 1 at the highest peak (fundamental) and marker 2 at the
+        next-lower peak (worst spur).
+
+        Returns a dict with:
+            fund_freq_hz, fund_amp_dbm,
+            spur_freq_hz, spur_amp_dbm,
+            sfdr_dbc
+
+        spur_freq_hz, spur_amp_dbm, and sfdr_dbc are NaN if no second peak
+        is found (instrument error 780).
+        """
+        # Marker 1 → fundamental (highest peak)
+        self.do_command(":CALCulate:MARKer1:MAXimum")
+        fund_freq = self.do_query_number(":CALCulate:MARKer1:X?")
+        fund_amp  = self.do_query_number(":CALCulate:MARKer1:Y?")
+
+        # Marker 2 → start at highest peak, step down to next lower peak (worst spur)
+        self.do_command(":CALCulate:MARKer2:MAXimum")
+        err = self.do_command(":CALCulate:MARKer2:MAXimum:NEXT")
+
+        if err and "+780" in err:
+            spur_freq = float("nan")
+            spur_amp  = float("nan")
+            sfdr      = float("nan")
+        else:
+            spur_freq = self.do_query_number(":CALCulate:MARKer2:X?")
+            spur_amp  = self.do_query_number(":CALCulate:MARKer2:Y?")
+            sfdr      = fund_amp - spur_amp
+
+        return {
+            "fund_freq_hz": fund_freq,
+            "fund_amp_dbm": fund_amp,
+            "spur_freq_hz": spur_freq,
+            "spur_amp_dbm": spur_amp,
+            "sfdr_dbc":     sfdr,
+        }
 
     # ------------------------------------------------------------------
     # Trace data
@@ -104,11 +149,11 @@ class KeysightEXA:
     # Low-level VISA helpers (same pattern as KeysightOscilloscope)
     # ------------------------------------------------------------------
 
-    def do_command(self, command: str) -> None:
+    def do_command(self, command: str) -> str | None:
         if self.debug:
             print(f"Cmd = '{command}'")
         self.exa.write(command)
-        self.check_instrument_errors(command, exit_on_error=False)
+        return self.check_instrument_errors(command, exit_on_error=False)
 
     def do_query_string(self, query: str) -> str:
         if self.debug:
@@ -133,8 +178,11 @@ class KeysightEXA:
         self.check_instrument_errors(query, exit_on_error=False)
         return result
 
-    def check_instrument_errors(self, command: str, exit_on_error: bool = True) -> None:
-        """Poll :SYSTem:ERRor? until the error queue is empty."""
+    def check_instrument_errors(self, command: str, exit_on_error: bool = True) -> str | None:
+        """
+        Poll :SYSTem:ERRor? until the error queue is empty.
+        Returns the first error string if one was found, otherwise None.
+        """
         while True:
             error_string: str = self.exa.query(":SYSTem:ERRor?")
             if error_string:
@@ -143,8 +191,9 @@ class KeysightEXA:
                     if exit_on_error:
                         print("Exited because of error.")
                         sys.exit(1)
+                    return error_string.strip()
                 else:
-                    break
+                    return None
             else:
                 print(f"ERROR: :SYSTem:ERRor? returned nothing, command: '{command}'")
                 print("Exited because of error.")

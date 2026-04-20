@@ -10,7 +10,7 @@ from dacdemo.board_control import BoardSession, list_ports
 from dacdemo.coherent_tone import build_plan
 from dacdemo.sine_gen import generate_sine_codes
 from dacdemo import config as _config
-from dacdemo.config import set_dac_freq, set_f_sample, set_coherent_params, set_siggen_addr, set_sa_addr, set_scope_addr
+from dacdemo.config import set_dac_freq, set_f_sample, set_coherent_params, set_fs_app, set_siggen_addr, set_sa_addr, set_scope_addr, set_sweep_frequencies, set_sweep_config
 
 ADAFRUIT_VID = 0x239A
 
@@ -206,6 +206,13 @@ def cmd_calc(args):
     x_seed = args.x_seed or ct["x_seed"]
     fin    = ct["fin"]
 
+    if args.fs_app is not None:
+        set_fs_app(args.fs_app)
+        print(f"config updated: fs_app={args.fs_app}")
+    if args.x_seed is not None:
+        set_coherent_params(x_seed, fin)
+        print(f"config updated: x_seed={x_seed}")
+
     if args.from_fout is not None:
         # Back-calculation: find the prime bin closest to the desired f_out,
         # then update [coherent_tone] so the forward calc produces consistent state.
@@ -224,6 +231,14 @@ def cmd_calc(args):
     set_dac_freq(f_out=plan.f_out, f_sample=plan.fs_actual)
     print(f"config updated: f_out={plan.f_out/1e6:.4f} MHz, f_sample={plan.fs_actual/1e9:.6f} GHz")
     print(output_path)
+
+    if args.fs_app is not None:
+        from dacdemo.siggen_control import SiggenSession
+        siggen_addr = cfg["instruments"]["siggen_addr"]
+        level = cfg["instruments"].get("siggen_level", "0 dBm")
+        with SiggenSession(siggen_addr) as sg:
+            sg.set_clock(plan.fs_actual, level)
+        print(f"siggen updated: {plan.fs_actual/1e9:.6f} GHz")
 
 
 def cmd_gen_sine(args):
@@ -297,10 +312,9 @@ def cmd_set_siggen(args):
     """
     Set the R&S SMA100B to the DAC sample clock frequency.
 
-    If --freq is supplied, f_sample is updated in config and the coherent
-    tone frequencies for the new f_sample are printed so the user knows
-    which f_out values remain valid. Run 'dacdemo calc' afterwards if you
-    need to regenerate the full coherent tone plan.
+    If --freq is supplied, f_sample is updated in [dac] and fs_app is
+    back-calculated and written to [coherent_tone], keeping both sections
+    in sync. Valid coherent f_out values for the new f_sample are printed.
     """
     from dacdemo.siggen_control import SiggenSession
 
@@ -316,7 +330,9 @@ def cmd_set_siggen(args):
 
     if args.freq is not None:
         set_f_sample(args.freq)
-        print(f"Config updated: f_sample = {args.freq / 1e9:.6f} GHz")
+        fs_app_back = args.freq / 2 ** 20
+        set_fs_app(fs_app_back)
+        print(f"Config updated: f_sample = {args.freq / 1e9:.6f} GHz, fs_app = {fs_app_back:.6f}")
         print("Valid coherent f_out values for new f_sample:")
         _coherent_tone_summary(args.freq, cfg["dac"]["num_samples"], cfg["coherent_tone"])
         print("  (Run 'dacdemo calc' to regenerate the full coherent tone plan.)\n")
@@ -431,6 +447,129 @@ def cmd_sa_measure(args):
         save_measurements_csv(measurements, output)
         if args.screenshot:
             sa.screenshot(output.parent / "sa_screenshot.png")
+
+
+def cmd_sa_sfdr(args):
+    """SFDR measurement via Keysight N9010B EXA Signal Analyzer."""
+    from dacdemo.siganalyzer_control import SASession, save_measurements_csv
+
+    cfg = _cfg()
+    addr      = cfg["instruments"]["sa_addr"]
+    center_hz = args.center or cfg["dac"]["f_out"]
+    span_hz   = args.span   or 2e6
+    rbw_hz    = args.rbw    or 10e3
+    vbw_hz    = args.vbw    or 10e3
+    ref_dbm   = args.ref    if args.ref is not None else 0.0
+    output    = Path(args.output) if args.output else Path("data/captures/sa_sfdr.csv")
+
+    with SASession(addr) as sa:
+        print(f"Connected: {sa.idn()}")
+        measurements = sa.measure_sfdr(
+            center_hz=center_hz,
+            span_hz=span_hz,
+            rbw_hz=rbw_hz,
+            vbw_hz=vbw_hz,
+            ref_level_dbm=ref_dbm,
+        )
+        for k, v in measurements.items():
+            print(f"  {k}: {v}")
+        save_measurements_csv(measurements, output)
+        if args.screenshot:
+            sa.screenshot(output.parent / "sa_sfdr_screenshot.png")
+
+
+def cmd_sa_sfdr_sweep(args):
+    """Sweep DAC output tone frequency and record SFDR at each coherent bin."""
+    import math
+    import time
+    from dacdemo.coherent_tone import find_coherent_bin
+    from dacdemo.board_control import BoardSession
+    from dacdemo.siganalyzer_control import SASession, save_measurements_csv
+
+    if args.sweep_config:
+        set_sweep_config(args.sweep_config)
+
+    cfg = _cfg()
+    dac_clock_hz = cfg["dac"]["f_sample"]
+    num_samples  = cfg["dac"]["num_samples"]
+    sa_addr      = cfg["instruments"]["sa_addr"]
+    port         = args.port     or cfg["hardware"]["port"]
+    baudrate     = args.baudrate or cfg["hardware"]["baudrate"]
+    center_hz    = args.center   if args.center is not None else dac_clock_hz / 4
+    span_hz      = args.span     if args.span   is not None else dac_clock_hz / 2
+    rbw_hz       = args.rbw      or 100e3
+    vbw_hz       = args.vbw      or 10e3
+    ref_dbm      = args.ref       if args.ref       is not None else 0.0
+    settle_s     = args.settle    if args.settle    is not None else 0.5
+    sa_settle_s  = args.sa_settle if args.sa_settle is not None else 1.0
+    output       = Path(args.output) if args.output else Path("data/captures/sa_sfdr_sweep.csv")
+
+    if args.freq_start is not None and args.freq_stop is not None and args.freq_step is not None:
+        targets = [
+            args.freq_start + i * args.freq_step
+            for i in range(math.floor((args.freq_stop - args.freq_start) / args.freq_step) + 1)
+        ]
+    elif args.freqs:
+        # Snap each target to its actual coherent bin, deduplicate, write back to TOML.
+        seen, actuals = set(), []
+        for t in args.freqs:
+            prime_bin, _ = find_coherent_bin(t, dac_clock_hz, num_samples)
+            if prime_bin not in seen:
+                seen.add(prime_bin)
+                actuals.append(prime_bin * dac_clock_hz / num_samples)
+        set_sweep_frequencies(actuals)
+        print(f"[sweep] frequencies updated in config ({len(actuals)} points).")
+        targets = actuals
+    else:
+        targets = cfg.get("sweep", {}).get("frequencies")
+        if not targets:
+            sys.exit("ERROR: provide --freq-start/stop/step, --freqs, or set [sweep] frequencies in config.")
+
+    total = len(targets)
+
+    board = BoardSession.open(port=port, baudrate=baudrate)
+    try:
+        with SASession(sa_addr) as sa:
+            print(f"Connected: {sa.idn()}")
+            seen_bins = set()
+            for idx, tone_hz_target in enumerate(targets, 1):
+                prime_bin, _ = find_coherent_bin(tone_hz_target, dac_clock_hz, num_samples)
+                tone_hz_actual = prime_bin * dac_clock_hz / num_samples
+
+                prefix = f"[{idx}/{total}] target={tone_hz_target/1e6:.3f} MHz  actual={tone_hz_actual/1e6:.3f} MHz"
+
+                if prime_bin in seen_bins:
+                    print(f"{prefix}  (skip — same bin)")
+                    continue
+                seen_bins.add(prime_bin)
+
+                board.dac_play_sine(f_out=tone_hz_actual, f_sample=dac_clock_hz)
+                if settle_s > 0:
+                    time.sleep(settle_s)
+
+                if args.windowed:
+                    measurements = sa.measure_sfdr_windowed(
+                        dac_clock_hz=dac_clock_hz,
+                        rbw_hz=rbw_hz,
+                        vbw_hz=vbw_hz,
+                        ref_level_dbm=ref_dbm,
+                        sa_settle_s=sa_settle_s,
+                    )
+                else:
+                    measurements = sa.measure_sfdr(
+                        center_hz=center_hz,
+                        span_hz=span_hz,
+                        rbw_hz=rbw_hz,
+                        vbw_hz=vbw_hz,
+                        ref_level_dbm=ref_dbm,
+                        sa_settle_s=sa_settle_s,
+                    )
+                sfdr = measurements["sfdr_dbc"]
+                sfdr_str = f"{sfdr:.1f} dBc" if sfdr == sfdr else "nan (no spur found)"
+                print(f"{prefix}  SFDR={sfdr_str}")
+                save_measurements_csv({"tone_hz_target": tone_hz_target, **measurements}, output)
+    finally:
+        board.close()
 
 
 def build_parser():
@@ -556,6 +695,60 @@ def build_parser():
     p.add_argument("--output", metavar="PATH",
         help="Output CSV path (default: data/captures/sa_measurements.csv)")
     p.set_defaults(func=cmd_sa_measure)
+
+    p = sub.add_parser("sa-sfdr",
+        help="SFDR measurement via Keysight N9010B EXA Signal Analyzer")
+    p.add_argument("--center", type=float, metavar="HZ",
+        help="Center frequency in Hz (default: dac.f_out from config)")
+    p.add_argument("--span", type=float, metavar="HZ",
+        help="Frequency span in Hz (default: 2e6)")
+    p.add_argument("--rbw", type=float, metavar="HZ",
+        help="Resolution bandwidth in Hz (default: 10e3)")
+    p.add_argument("--vbw", type=float, metavar="HZ",
+        help="Video bandwidth in Hz (default: 10e3)")
+    p.add_argument("--ref", type=float, metavar="DBM",
+        help="Reference level in dBm (default: 0.0)")
+    p.add_argument("--screenshot", action="store_true",
+        help="Also save a PNG screenshot")
+    p.add_argument("--output", metavar="PATH",
+        help="Output CSV path (default: data/captures/sa_sfdr.csv)")
+    p.set_defaults(func=cmd_sa_sfdr)
+
+    p = sub.add_parser("sa-sfdr-sweep",
+        help="Sweep DAC tone frequency and measure SFDR at each coherent bin")
+    p.add_argument("--freq-start", type=float, metavar="HZ",
+        help="Sweep start frequency (Hz)")
+    p.add_argument("--freq-stop", type=float, metavar="HZ",
+        help="Sweep stop frequency, inclusive (Hz)")
+    p.add_argument("--freq-step", type=float, metavar="HZ",
+        help="Step between target frequencies (Hz); actual steps quantized to prime bins")
+    p.add_argument("--freqs", type=float, nargs="+", metavar="HZ",
+        help="Explicit list of target frequencies (Hz); snapped to coherent bins and saved to config")
+    p.add_argument("--center", type=float, metavar="HZ",
+        help="SA center frequency in Hz (default: f_sample/4 — Nyquist midpoint)")
+    p.add_argument("--span", type=float, metavar="HZ",
+        help="SA frequency span in Hz (default: f_sample/2 — full Nyquist band)")
+    p.add_argument("--rbw", type=float, metavar="HZ",
+        help="SA resolution bandwidth in Hz (default: 100e3)")
+    p.add_argument("--vbw", type=float, metavar="HZ",
+        help="SA video bandwidth in Hz (default: 10e3)")
+    p.add_argument("--ref", type=float, metavar="DBM",
+        help="SA reference level in dBm (default: 0.0)")
+    p.add_argument("--settle", type=float, metavar="SEC",
+        help="DAC settling time in seconds after reprogramming (default: 0.5)")
+    p.add_argument("--sa-settle", type=float, metavar="SEC",
+        help="SA settling time between configure and sweep trigger, per window (default: 1.0)")
+    p.add_argument("--windowed", action="store_true",
+        help="Divide Nyquist band into 4 sub-windows for higher resolution SFDR measurement")
+    p.add_argument("--sweep-config", metavar="NAME",
+        help="Switch active sweep config to config/sweeps/NAME.toml before running")
+    p.add_argument("--port",
+        help="Serial port override")
+    p.add_argument("--baudrate", type=int,
+        help="Baudrate override")
+    p.add_argument("--output", metavar="PATH",
+        help="Output CSV path (default: data/captures/sa_sfdr_sweep.csv)")
+    p.set_defaults(func=cmd_sa_sfdr_sweep)
 
     return parser
 
