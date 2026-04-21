@@ -17,7 +17,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "instrument_comms"))
 
 import pyvisa
+from dacdemo.comprehensive_analysis import analyze_trace_metrics
 from instruments.keysight_exa import KeysightEXA
+from dacdemo.snr_analysis import estimate_snr_from_trace
 
 
 # Canonical column order for sa-sfdr-sweep CSV output. Both single and windowed
@@ -50,6 +52,78 @@ SFDR_SWEEP_FIELDNAMES = [
     "peak_2_freq_hz", "peak_2_amp_dbm",
     "peak_3_freq_hz", "peak_3_amp_dbm",
     "peak_4_freq_hz", "peak_4_amp_dbm",
+]
+
+SNR_SWEEP_FIELDNAMES = [
+    "timestamp",
+    "mode",
+    "tone_hz_target",
+    "dac_clock_hz",
+    "center_hz",
+    "span_hz",
+    "rbw_hz",
+    "vbw_hz",
+    "ref_level_dbm",
+    "fund_freq_hz",
+    "fund_amp_dbm",
+    "noise_freq_hz",
+    "noise_left_freq_hz",
+    "noise_left_dbm",
+    "noise_right_freq_hz",
+    "noise_right_dbm",
+    "noise_level_dbm",
+    "noise_bandwidth_hz",
+    "noise_exclusion_hz",
+    "noise_method",
+    "snr_db",
+]
+
+COMPREHENSIVE_SWEEP_FIELDNAMES = [
+    "timestamp",
+    "mode",
+    "tone_hz_target",
+    "tone_hz_clipped",
+    "tone_hz_actual",
+    "coherent_bin_k",
+    "dac_clock_hz",
+    "center_hz",
+    "span_hz",
+    "rbw_hz",
+    "vbw_hz",
+    "ref_level_dbm",
+    "fund_freq_hz",
+    "fund_amp_dbm",
+    "spur_freq_hz",
+    "spur_amp_dbm",
+    "sfdr_dbc",
+    "spur_class",
+    "sfdr_valid",
+    "harmonic_tol_hz",
+    "expected_h2_hz",
+    "expected_h3_hz",
+    "expected_h4_hz",
+    "expected_h5_hz",
+    "h2_freq_hz",
+    "h2_amp_dbm",
+    "h2_dbc",
+    "h3_freq_hz",
+    "h3_amp_dbm",
+    "h3_dbc",
+    "h4_freq_hz",
+    "h4_amp_dbm",
+    "h5_freq_hz",
+    "h5_amp_dbm",
+    "thd_dbc",
+    "noise_freq_hz",
+    "noise_left_freq_hz",
+    "noise_left_dbm",
+    "noise_right_freq_hz",
+    "noise_right_dbm",
+    "noise_level_dbm",
+    "noise_bandwidth_hz",
+    "noise_exclusion_hz",
+    "noise_method",
+    "snr_db",
 ]
 
 
@@ -171,6 +245,102 @@ class SASession:
             "peak_4_freq_hz": float("nan"),
             "peak_4_amp_dbm": float("nan"),
         }
+
+    def measure_snr(
+        self,
+        center_hz: float,
+        span_hz: float,
+        rbw_hz: float = 10e3,
+        vbw_hz: float = 10e3,
+        ref_level_dbm: float = 0.0,
+        noise_bw_hz: float | None = None,
+        dac_clock_hz: float | None = None,
+        sa_settle_s: float = 0.0,
+    ) -> dict:
+        """
+        Configure the analyzer, run one sweep, and estimate SNR from the trace.
+
+        The signal is the highest peak in the current span. Noise is estimated
+        from nearby left/right trace windows while avoiding the tone and
+        expected harmonics.
+        """
+        if noise_bw_hz is None:
+            noise_bw_hz = span_hz
+        self._drv.configure_spectrum_view(
+            center_hz=center_hz,
+            span_hz=span_hz,
+            rbw_hz=rbw_hz,
+            vbw_hz=vbw_hz,
+            ref_level_dbm=ref_level_dbm,
+        )
+        if sa_settle_s > 0:
+            time.sleep(sa_settle_s)
+        self._drv.single_sweep()
+        fund_freq_hz, fund_amp_dbm = self._drv.measure_peak()
+        trace_dbm = self._drv.get_trace_ascii()
+        noise = estimate_snr_from_trace(
+            trace_dbm=trace_dbm,
+            center_hz=center_hz,
+            span_hz=span_hz,
+            rbw_hz=rbw_hz,
+            fund_freq_hz=fund_freq_hz,
+            fund_amp_dbm=fund_amp_dbm,
+            noise_bw_hz=noise_bw_hz,
+            dac_clock_hz=dac_clock_hz,
+        )
+        return {
+            "mode": "single",
+            "center_hz": center_hz,
+            "span_hz": span_hz,
+            "rbw_hz": rbw_hz,
+            "vbw_hz": vbw_hz,
+            "ref_level_dbm": ref_level_dbm,
+            "fund_freq_hz": fund_freq_hz,
+            "fund_amp_dbm": fund_amp_dbm,
+            **noise,
+        }
+
+    def measure_comprehensive(
+        self,
+        center_hz: float,
+        span_hz: float,
+        rbw_hz: float,
+        vbw_hz: float,
+        ref_level_dbm: float,
+        noise_bw_hz: float,
+        dac_clock_hz: float,
+        num_samples: int,
+        sa_settle_s: float = 0.0,
+    ) -> dict:
+        """
+        Configure the analyzer, run one sweep, and derive comprehensive RF
+        metrics from a single trace: SFDR, SNR, THD, and harmonics up to 5H.
+        """
+        self._drv.configure_spectrum_view(
+            center_hz=center_hz,
+            span_hz=span_hz,
+            rbw_hz=rbw_hz,
+            vbw_hz=vbw_hz,
+            ref_level_dbm=ref_level_dbm,
+        )
+        if sa_settle_s > 0:
+            time.sleep(sa_settle_s)
+        self._drv.single_sweep()
+        fund_freq_hz, fund_amp_dbm = self._drv.measure_peak()
+        trace_dbm = self._drv.get_trace_ascii()
+        return analyze_trace_metrics(
+            trace_dbm=trace_dbm,
+            center_hz=center_hz,
+            span_hz=span_hz,
+            rbw_hz=rbw_hz,
+            vbw_hz=vbw_hz,
+            ref_level_dbm=ref_level_dbm,
+            fund_freq_hz=fund_freq_hz,
+            fund_amp_dbm=fund_amp_dbm,
+            dac_clock_hz=dac_clock_hz,
+            noise_bw_hz=noise_bw_hz,
+            num_samples=num_samples,
+        )
 
     def measure_sfdr_windowed(
         self,

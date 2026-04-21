@@ -7,6 +7,19 @@ from math import log10
 _MULTIPLIER = 1e6
 
 
+def _is_prime(v: int) -> bool:
+    if v < 2:
+        return False
+    if v % 2 == 0:
+        return v == 2
+    d = 3
+    while d * d <= v:
+        if v % d == 0:
+            return False
+        d += 2
+    return True
+
+
 @dataclass
 class CoherentTonePlan:
     fs_app: float
@@ -25,27 +38,15 @@ def matlab_equivalent_fs_actual(fs_app: float) -> float:
 
 
 def nearest_prime_bins(x_seed: int) -> list[int]:
-    def is_prime(v: int) -> bool:
-        if v < 2:
-            return False
-        if v % 2 == 0:
-            return v == 2
-        d = 3
-        while d * d <= v:
-            if v % d == 0:
-                return False
-            d += 2
-        return True
-
     lower = x_seed
     upper = x_seed
     while True:
-        if is_prime(lower) and is_prime(upper):
+        if _is_prime(lower) and _is_prime(upper):
             out = sorted(set([lower, upper]))
             return out
-        if not is_prime(lower):
+        if not _is_prime(lower):
             lower -= 1
-        if not is_prime(upper):
+        if not _is_prime(upper):
             upper += 1
 
 
@@ -88,3 +89,43 @@ def find_coherent_bin(f_out_target: float, f_sample: float, n: int) -> tuple[int
         return b_low, "low"
     else:
         return b_high, "high"
+
+
+def find_coherent_inband_bin(f_out_target: float, f_sample: float, n: int) -> tuple[int, str, float]:
+    """
+    Clip the requested tone to Nyquist, then return the nearest coherent prime
+    bin whose generated tone remains in-band (<= f_sample / 2).
+
+    Returns:
+        (prime_bin, fin, clipped_target_hz)
+    """
+    nyquist_hz = f_sample / 2
+    clipped_target_hz = min(max(f_out_target, 0.0), nyquist_hz)
+    max_bin = max(2, int(n // 2))
+    b_ideal = clipped_target_hz * n / f_sample
+    b_seed = min(max(2, round(b_ideal)), max_bin)
+
+    best_bin = None
+    best_diff = float("inf")
+    max_radius = max(b_seed - 2, max_bin - b_seed)
+    for radius in range(max_radius + 1):
+        candidates = []
+        lower = b_seed - radius
+        upper = b_seed + radius
+        if 2 <= lower <= max_bin:
+            candidates.append(lower)
+        if upper != lower and 2 <= upper <= max_bin:
+            candidates.append(upper)
+        for candidate in candidates:
+            if not _is_prime(candidate):
+                continue
+            diff = abs(candidate - b_ideal)
+            if diff < best_diff or (diff == best_diff and candidate > best_bin):
+                best_bin = candidate
+                best_diff = diff
+        if best_bin is not None and radius > best_diff:
+            break
+
+    if best_bin is None:
+        best_bin = 2
+    return best_bin, "low", clipped_target_hz

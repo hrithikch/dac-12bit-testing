@@ -13,6 +13,12 @@ else:
 _DEFAULT_CONFIG_PATH = Path(__file__).parents[2] / "config" / "dacdemo.toml"
 
 
+def _log_config_write(path: Path, values: dict, label: str | None = None) -> None:
+    prefix = f"[config] {label}" if label else "[config]"
+    rendered = ", ".join(f"{key}={value}" for key, value in values.items())
+    print(f"{prefix}: {rendered} -> {path}")
+
+
 def load(path: Path = _DEFAULT_CONFIG_PATH) -> dict:
     with open(path, "rb") as f:
         cfg = tomllib.load(f)
@@ -34,6 +40,7 @@ def set_port(port: str, path: Path = _DEFAULT_CONFIG_PATH) -> None:
         flags=re.MULTILINE,
     )
     path.write_text(updated, encoding="utf-8")
+    _log_config_write(path, {"port": repr(port)}, label="hardware")
 
 
 def set_dac_freq(f_out: float, f_sample: float, path: Path = _DEFAULT_CONFIG_PATH) -> None:
@@ -52,6 +59,7 @@ def set_dac_freq(f_out: float, f_sample: float, path: Path = _DEFAULT_CONFIG_PAT
         flags=re.MULTILINE,
     )
     path.write_text(text, encoding="utf-8")
+    _log_config_write(path, {"f_out": f"{f_out!r}", "f_sample": f"{f_sample!r}"}, label="dac")
 
 
 def set_f_sample(f_sample: float, path: Path = _DEFAULT_CONFIG_PATH) -> None:
@@ -64,6 +72,7 @@ def set_f_sample(f_sample: float, path: Path = _DEFAULT_CONFIG_PATH) -> None:
         flags=re.MULTILINE,
     )
     path.write_text(text, encoding="utf-8")
+    _log_config_write(path, {"f_sample": f"{f_sample!r}"}, label="dac")
 
 
 def set_fs_app(fs_app: float, path: Path = _DEFAULT_CONFIG_PATH) -> None:
@@ -76,6 +85,7 @@ def set_fs_app(fs_app: float, path: Path = _DEFAULT_CONFIG_PATH) -> None:
         flags=re.MULTILINE,
     )
     path.write_text(text, encoding="utf-8")
+    _log_config_write(path, {"fs_app": f"{fs_app!r}"}, label="coherent_tone")
 
 
 def set_siggen_addr(addr: str, path: Path = _DEFAULT_CONFIG_PATH) -> None:
@@ -88,6 +98,7 @@ def set_siggen_addr(addr: str, path: Path = _DEFAULT_CONFIG_PATH) -> None:
         flags=re.MULTILINE,
     )
     path.write_text(updated, encoding="utf-8")
+    _log_config_write(path, {"siggen_addr": repr(addr)}, label="instruments")
 
 
 def set_sa_addr(addr: str, path: Path = _DEFAULT_CONFIG_PATH) -> None:
@@ -100,6 +111,7 @@ def set_sa_addr(addr: str, path: Path = _DEFAULT_CONFIG_PATH) -> None:
         flags=re.MULTILINE,
     )
     path.write_text(updated, encoding="utf-8")
+    _log_config_write(path, {"sa_addr": repr(addr)}, label="instruments")
 
 
 def set_scope_addr(addr: str, path: Path = _DEFAULT_CONFIG_PATH) -> None:
@@ -112,6 +124,7 @@ def set_scope_addr(addr: str, path: Path = _DEFAULT_CONFIG_PATH) -> None:
         flags=re.MULTILINE,
     )
     path.write_text(updated, encoding="utf-8")
+    _log_config_write(path, {"scope_addr": repr(addr)}, label="instruments")
 
 
 def set_sweep_frequencies(frequencies: list, path: Path = _DEFAULT_CONFIG_PATH) -> None:
@@ -128,6 +141,11 @@ def set_sweep_frequencies(frequencies: list, path: Path = _DEFAULT_CONFIG_PATH) 
         + "]\n"
     )
     sweep_path.write_text(content, encoding="utf-8")
+    _log_config_write(
+        sweep_path,
+        {"frequencies": f"[{', '.join(repr(f) for f in frequencies)}]"},
+        label=f"sweep:{sweep_name}",
+    )
 
 
 def set_sweep_config(name: str, path: Path = _DEFAULT_CONFIG_PATH) -> None:
@@ -140,6 +158,7 @@ def set_sweep_config(name: str, path: Path = _DEFAULT_CONFIG_PATH) -> None:
         flags=re.MULTILINE,
     )
     path.write_text(text, encoding="utf-8")
+    _log_config_write(path, {"config": repr(name)}, label="sweep")
 
 
 def set_coherent_params(x_seed: int, fin: str, path: Path = _DEFAULT_CONFIG_PATH) -> None:
@@ -158,3 +177,4 @@ def set_coherent_params(x_seed: int, fin: str, path: Path = _DEFAULT_CONFIG_PATH
         flags=re.MULTILINE,
     )
     path.write_text(text, encoding="utf-8")
+    _log_config_write(path, {"x_seed": f"{x_seed!r}", "fin": repr(fin)}, label="coherent_tone")

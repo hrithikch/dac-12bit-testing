@@ -22,11 +22,14 @@ Reads `[coherent_tone]` from config, derives `f_sample` and `f_out`, writes them
 - `x_seed` → nearest prime bins → `f_out = chosen_bin × f_sample / num_samples`
 - `fin = "low"` or `"high"` selects which prime bin
 
+In this coherent-tone workflow, `num_samples` is fixed and `f_sample` is chosen first. That means each requested output tone is realized by choosing a coherent prime bin `k`, with `f_out = k × f_sample / num_samples`.
+
 Run this any time you change `fs_app`, `x_seed`, or `fin`. Everything downstream reads from `[dac]`.
 
 ```
 dacdemo calc --x-seed 7         # change output frequency bin
 dacdemo calc --from-fout 61e6   # back-calculate x_seed + fin from a desired f_out
+dacdemo calc --fs-app 5000      # write fs_app, recompute f_sample + f_out in config
 ```
 
 **`dacdemo gen-sine`**
@@ -39,7 +42,7 @@ Generates the 256-sample 12-bit sine table from `f_out` and `f_sample`, saves to
 **`dacdemo health`**
 Reads voltage, shunt voltage, current, and power from all five rails via INA219. Read-only — safe without chip in socket.
 
-**`dacdemo prep`** — one-shot pre-connect wrapper: `detect-port` → `flash` → `bias`. Runs before the DUT socket is attached.
+**`dacdemo prep`** — one-shot pre-connect wrapper: `detect-port` → `calc` → `flash` → `bias`. Runs before the DUT socket is attached.
 ```bash
 dacdemo prep --initialize-compliance
 ```
@@ -104,8 +107,19 @@ Single-tone SFDR measurement. SA window covers the full Nyquist band (center = `
 dacdemo sa-sfdr
 ```
 
+**`dacdemo sa-snr`**
+Single-tone SNR measurement. Runs one SA sweep, finds the fundamental as the highest peak, then estimates nearby noise from left/right trace windows that avoid the tone and expected harmonics. SNR is calculated as `fund_amp_dbm - (noise_level_dbm + 10*log10(noise_bw_hz / rbw_hz))`. By default `noise_bw_hz = span`.
+```
+dacdemo sa-snr
+dacdemo sa-snr --noise-bw 10e6
+```
+
 **`dacdemo sa-sfdr-sweep`**
 Sweeps the DAC output tone across a set of frequencies and records SFDR at each step. Frequency lists live in separate files under `config/sweeps/` (e.g. `config/sweeps/default.toml`). The active sweep is selected by name in `config/dacdemo.toml` under `[sweep] config`.
+
+Mental model: for a given sweep run, `f_sample` and `num_samples` stay fixed. Each requested `f_out` is snapped to the nearest coherent prime bin `k`, then the actual generated tone is `k × f_sample / num_samples`.
+
+At sweep start, the CLI also programs the R&S siggen to the current `f_sample` from `[dac]`, so the clock source is aligned with the DAC settings for the whole run.
 
 ```
 # Linear range on the command line:
@@ -121,17 +135,36 @@ dacdemo sa-sfdr-sweep --sweep-config high_freq
 dacdemo sa-sfdr-sweep --windowed --sa-settle 1.5
 ```
 
-Target frequencies snap to the nearest coherent prime bin. Duplicate bins are skipped. Output: `data/captures/sa_sfdr_sweep.csv` — 30-column unified schema shared by both modes, including `sfdr_dbc`, `spur_class` (`harmonic_N` / `bin_split` / `other`), `sfdr_valid`, expected-harmonic frequencies, and per-marker / per-window peak traceability. If the file's header doesn't match the current schema (e.g., after a code update) it is auto-archived as `sa_sfdr_sweep.legacy-<timestamp>.csv` before writing. Use `--windowed` when the fundamental is split across SA display bins in wide-span mode. See `docs/command_reference.md` for the full column list and options.
+Target frequencies are first clipped to Nyquist (`f_sample / 2`), then snapped to the nearest coherent in-band prime bin. In other words, the sweep variable is the bin index `k` while `f_sample` and `num_samples` remain fixed. Duplicate bins are skipped. Output: `data/captures/sa_sfdr_sweep.csv` - 30-column unified schema shared by both modes, including `sfdr_dbc`, `spur_class` (`harmonic_N` / `bin_split` / `other`), `sfdr_valid`, expected-harmonic frequencies, and per-marker / per-window peak traceability. If the file's header doesn't match the current schema (e.g., after a code update) it is auto-archived as `sa_sfdr_sweep.legacy-<timestamp>.csv` before writing. Use `--windowed` when the fundamental is split across SA display bins in wide-span mode. See `docs/command_reference.md` for the full column list and options.
+
+**`dacdemo sa-snr-sweep`**
+Sweeps the DAC output tone across frequencies and records SNR at each step using the same coherent-bin sweep machinery as `sa-sfdr-sweep`. Output: `data/captures/sa_snr_sweep.csv`.
+
+It uses the same fixed-`f_sample`, fixed-`num_samples`, sweep-`k` model as `sa-sfdr-sweep`: requested `f_out` values are snapped to coherent prime bins and the actual generated tone is `k × f_sample / num_samples`.
+It also programs the R&S siggen to `[dac].f_sample` before the sweep starts.
+```
+dacdemo sa-snr-sweep
+dacdemo sa-snr-sweep --freq-start 200e6 --freq-stop 500e6 --freq-step 50e6 --noise-bw 20e6
+```
+
+**`dacdemo sa-comprehensive-sweep`**
+Sweeps the DAC output tone across frequencies and records `SFDR`, `SNR`, `THD`, `H2`, and `H3` from one SA trace per point. It uses the same Nyquist-clipped, coherent-bin sweep logic as the other SA sweep commands and writes `data/captures/sa_comprehensive_sweep.csv`.
+```
+dacdemo sa-comprehensive-sweep --freqs 100e6 500e6 1e9 2e9 3e9 4e9
+```
 
 ---
 
 ## Typical full sequence
 
 ```bash
-dacdemo calc                              # derive f_sample + f_out
-dacdemo set-siggen                        # push f_sample to R&S clock generator
-dacdemo run-demo --initialize-compliance  # bias rails + load + enable DAC
-dacdemo capture                           # capture + decode + validate SPI
-dacdemo scope-measure                     # measure analog output on scope
-dacdemo sa-sfdr-sweep                     # sweep SFDR across frequency range
+# 1. edit config/dacdemo.toml or config/sweeps/<name>.toml
+# 2. choose the sample clock
+dacdemo calc --fs-app 5000                # example: writes fs_app, f_sample, and f_out to config
+
+# 3. prep the bench
+dacdemo prep --initialize-compliance      # detect port + calc + flash + bias
+
+# 4. run a sweep
+dacdemo sa-comprehensive-sweep --freqs 100e6 500e6 1e9 2e9 3e9 4e9
 ```

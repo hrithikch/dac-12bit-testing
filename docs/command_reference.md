@@ -52,6 +52,10 @@ You used to have to choose which sketch to flash. The new firmware handles both 
 
 **Rule:** only edit `[coherent_tone]` inputs and `num_samples`. Everything else in `[dac]` is computed. Run `dacdemo calc` after any change to `[coherent_tone]` to keep the config in sync.
 
+For this coherent-tone flow, `f_out` is not independent of `f_sample`. With `num_samples = N` fixed, tones are generated on coherent bins:
+`f_out = k × f_sample / N`
+where `k` is the selected prime bin.
+
 ---
 
 ## Activate venv
@@ -107,6 +111,12 @@ The derivation chain:
 - `fs_app` → `fs_actual = fs_app × 2^20` → written as `f_sample`
 - `x_seed` → nearest pair of prime FFT bins (`prime_bins`)
 - `fin` (`"low"` or `"high"`) → selects which prime bin → written as `f_out`
+
+Equivalent view:
+- choose `f_sample`
+- hold `num_samples = N` fixed
+- choose coherent bin `k`
+- get `f_out = k × f_sample / N`
 
 `multiplier` (the `2^20` scale factor) is a fixed constant in code — not a config param.
 `num_samples` comes from `[dac]` — not duplicated in `[coherent_tone]`.
@@ -202,7 +212,7 @@ flag resets current limits before applying voltages.
 ```
 dacdemo prep --initialize-compliance
 ```
-One-shot wrapper that runs `detect-port` → `flash` → `bias` with numbered banners at each step and prints `Prep complete. Safe to connect the socket now.` when finished. Same flags as the underlying commands (`--fqbn`, `--sketch`, `--port`, `--baudrate`, `--initialize-compliance`) — each omitted flag falls back to config. Intended for the pre-socket sequence; do not run with the DUT already seated.
+One-shot wrapper that runs `detect-port` → `calc` → `flash` → `bias` with numbered banners at each step and prints `Prep complete. Safe to connect the socket now.` when finished. The `calc` step refreshes derived `[dac]` values (`f_sample`, `f_out`) from the current `[coherent_tone]` config before firmware/programming steps continue. Same flags as the underlying commands (`--fqbn`, `--sketch`, `--port`, `--baudrate`, `--initialize-compliance`) — each omitted flag falls back to config. Intended for the pre-socket sequence; do not run with the DUT already seated.
 
 ### Legacy two-sketch wrapper — `dacdemo legacy`
 
@@ -355,7 +365,7 @@ Write measurements CSV to a custom path.
 
 ---
 
-### Single-tone SFDR — `sa-sfdr`
+### Single-tone SFDR - `sa-sfdr`
 
 ```
 dacdemo sa-sfdr
@@ -378,11 +388,41 @@ Also save a PNG screenshot; write CSV to a custom path.
 
 ---
 
-### SFDR frequency sweep — `sa-sfdr-sweep`
+### Single-tone SNR - `sa-snr`
+
+```
+dacdemo sa-snr
+```
+Measures SNR at the current `dac.f_out`. Runs one sweep, places the fundamental at the highest trace peak, then estimates the noise floor from nearby left/right trace windows while excluding the fundamental and predicted 2nd-5th harmonics. Appends a timestamped row to `data/captures/sa_snr.csv`.
+
+Formula:
+`snr_db = fund_amp_dbm - (noise_level_dbm + 10*log10(noise_bw_hz / rbw_hz))`
+
+By default `noise_bw_hz = span_hz`, so the integrated noise bandwidth tracks the acquisition span unless you override it.
+
+Measurements include: `center_hz`, `span_hz`, `rbw_hz`, `vbw_hz`, `ref_level_dbm`, `fund_freq_hz`, `fund_amp_dbm`, `noise_freq_hz`, `noise_left_freq_hz`, `noise_left_dbm`, `noise_right_freq_hz`, `noise_right_dbm`, `noise_level_dbm`, `noise_bandwidth_hz`, `noise_exclusion_hz`, `noise_method`, `snr_db`.
+
+```
+dacdemo sa-snr --center 266e6 --span 50e6 --noise-bw 10e6
+```
+Override the SA window and the integrated noise bandwidth.
+
+```
+dacdemo sa-snr --rbw 30e3 --vbw 10e3 --screenshot
+```
+Change RBW/VBW and also save a PNG screenshot.
+
+---
+
+### SFDR frequency sweep - `sa-sfdr-sweep`
 
 Iterates the DAC output tone across a set of target frequencies, reprograms the DAC at each step, measures SFDR from the signal analyzer, and appends one row per step to a CSV.
 
-**Frequency quantization:** target frequencies snap to the nearest prime FFT bin: `tone_hz_actual = prime_bin × f_sample / num_samples`. The requested target and the actual frequency are both recorded in the CSV. Targets that map to the same prime bin are skipped.
+**Frequency quantization:** target frequencies are first clipped to Nyquist (`f_sample / 2`), then snapped to the nearest in-band prime FFT bin: `tone_hz_actual = prime_bin × f_sample / num_samples`. The requested target and the actual frequency are both recorded in the CSV. Targets that map to the same prime bin are skipped.
+
+This means the sweep holds `f_sample` fixed and `num_samples` fixed, while the effective sweep variable is the coherent bin index `k`. The user supplies desired `f_out` targets; the CLI converts each one into the nearest coherent prime bin and uses that bin's actual tone.
+
+Before the first measurement point, the command also programs the R&S siggen to `[dac].f_sample` so the external sample clock matches the sweep assumptions.
 
 ---
 
@@ -423,11 +463,11 @@ dacdemo sa-sfdr-sweep --freq-start 200e6 --freq-stop 500e6 --freq-step 50e6
 ```
 Generates targets `[200, 250, 300, …, 500]` MHz. All three arguments are required together. Does not modify any sweep config file.
 
-*Option 2 — arbitrary list on the command line:*
+*Option 2 - arbitrary list on the command line:*
 ```
 dacdemo sa-sfdr-sweep --freqs 200e6 266e6 400e6 471e6
 ```
-Each target is snapped to the nearest coherent prime bin. Duplicates are dropped. The resulting actual frequencies are written to the currently active sweep config file (`config/sweeps/{config}.toml`) for reuse.
+Each target is clipped to Nyquist, then snapped to the nearest coherent in-band prime bin. Duplicates are dropped, meaning two requested frequencies that land on the same `k` produce one measurement point. The resulting actual frequencies are written to the currently active sweep config file (`config/sweeps/{config}.toml`) for reuse.
 
 *Option 3 — active sweep config file:*
 ```
@@ -507,3 +547,118 @@ Both modes write a single unified schema to `data/captures/sa_sfdr_sweep.csv`. I
 | `--port` | config | Serial port override |
 | `--baudrate` | config | Baudrate override |
 | `--output` | `data/captures/sa_sfdr_sweep.csv` | Output CSV path |
+
+---
+
+### SNR frequency sweep - `sa-snr-sweep`
+
+Iterates the DAC output tone across a set of target frequencies, reprograms the DAC at each step, measures SNR from the signal analyzer, and appends one row per step to a CSV.
+
+Frequency selection and coherent-bin snapping behave exactly like `sa-sfdr-sweep`: use `--freq-start/stop/step`, `--freqs`, or the active sweep config file. Targets above Nyquist are clipped before coherent-bin selection.
+
+Like `sa-sfdr-sweep`, this keeps `f_sample` fixed and `num_samples` fixed during the run, and sweeps by selecting different coherent prime bins `k` for the requested `f_out` values.
+Before the first measurement point, it also programs the R&S siggen to `[dac].f_sample`.
+
+```
+dacdemo sa-snr-sweep
+dacdemo sa-snr-sweep --sweep-config low_band
+dacdemo sa-snr-sweep --freq-start 200e6 --freq-stop 500e6 --freq-step 50e6 --noise-bw 20e6
+```
+
+Per point, the analyzer:
+1. Sweeps the configured span.
+2. Takes the highest trace peak as the signal.
+3. Probes left/right nearby noise windows.
+4. Rejects windows that overlap the tone, expected harmonics, or obvious local spurs.
+5. Computes `snr_db` using the requested `noise_bw_hz` and current `rbw_hz`.
+
+Output CSV: `data/captures/sa_snr_sweep.csv`
+
+| Column | Description |
+|---|---|
+| `timestamp` | ISO 8601 |
+| `mode` | Currently always `single` |
+| `tone_hz_target` | requested frequency (Hz) |
+| `dac_clock_hz` | DAC `f_sample` used for harmonic exclusion |
+| `center_hz`, `span_hz`, `rbw_hz`, `vbw_hz`, `ref_level_dbm` | SA configuration |
+| `fund_freq_hz`, `fund_amp_dbm` | Fundamental peak used in the SNR calculation |
+| `noise_freq_hz` | Representative noise-probe frequency (`NaN` on fallback modes) |
+| `noise_left_freq_hz`, `noise_left_dbm` | Left-side probe result when available |
+| `noise_right_freq_hz`, `noise_right_dbm` | Right-side probe result when available |
+| `noise_level_dbm` | Noise level measured in RBW before bandwidth scaling |
+| `noise_bandwidth_hz` | Integrated noise bandwidth used in the formula |
+| `noise_exclusion_hz` | Guard band around the tone and harmonics |
+| `noise_method` | `paired_probes`, `single_probe`, `masked_median_fallback`, or failure mode |
+| `snr_db` | Final SNR result in dB |
+
+| Option | Default | Notes |
+|---|---|---|
+| `--freq-start/stop/step` | - | Linear range; all three required if used |
+| `--freqs HZ [HZ ...]` | - | Arbitrary list; snapped to prime bins and saved to active sweep config |
+| `--sweep-config NAME` | - | Switch active sweep config to `config/sweeps/NAME.toml` |
+| `--center` | `f_sample / 4` | SA window center |
+| `--span` | `f_sample / 2` | SA window span |
+| `--rbw` | `100e3` | Resolution bandwidth (Hz) |
+| `--vbw` | `10e3` | Video bandwidth (Hz) |
+| `--noise-bw` | `span` | Integrated noise bandwidth used in the SNR formula |
+| `--ref` | `0.0` | SA reference level (dBm) |
+| `--settle` | `0.5` | DAC settling time after reprogramming (s) |
+| `--sa-settle` | `1.0` | SA settle delay between configure and sweep trigger (s) |
+| `--port` | config | Serial port override |
+| `--baudrate` | config | Baudrate override |
+| `--output` | `data/captures/sa_snr_sweep.csv` | Output CSV path |
+
+---
+
+### Comprehensive frequency sweep - `sa-comprehensive-sweep`
+
+Runs one wide-span SA sweep per tone and derives all of the following from that single trace:
+- `SFDR`
+- `SNR`
+- `THD`
+- `H2`
+- `H3`
+
+Harmonics are searched near the predicted aliased 2nd-5th harmonic locations, `SNR` comes from the nearby masked noise-floor estimate, and `THD` is calculated from the summed power of H2-H5.
+
+Frequency selection uses the same rule as the other sweep commands:
+- hold `f_sample` fixed
+- hold `num_samples` fixed
+- clip requested `f_out` to Nyquist
+- snap to the nearest coherent in-band prime bin `k`
+- generate `f_out_actual = k × f_sample / num_samples`
+
+```
+dacdemo sa-comprehensive-sweep
+dacdemo sa-comprehensive-sweep --freqs 100e6 500e6 1e9 2e9 3e9 4e9
+```
+
+Output CSV: `data/captures/sa_comprehensive_sweep.csv`
+
+Key columns:
+- `tone_hz_target`, `tone_hz_clipped`, `tone_hz_actual`, `coherent_bin_k`
+- `fund_freq_hz`, `fund_amp_dbm`
+- `sfdr_dbc`, `spur_freq_hz`, `spur_amp_dbm`, `spur_class`
+- `snr_db`, `noise_level_dbm`, `noise_bandwidth_hz`, `noise_method`
+- `thd_dbc`
+- `h2_freq_hz`, `h2_amp_dbm`, `h2_dbc`
+- `h3_freq_hz`, `h3_amp_dbm`, `h3_dbc`
+- `h4_freq_hz`, `h4_amp_dbm`
+- `h5_freq_hz`, `h5_amp_dbm`
+
+| Option | Default | Notes |
+|---|---|---|
+| `--freq-start/stop/step` | - | Linear range; all three required if used |
+| `--freqs HZ [HZ ...]` | - | Arbitrary list; clipped to Nyquist, snapped to coherent bins, and saved to active sweep config |
+| `--sweep-config NAME` | - | Switch active sweep config to `config/sweeps/NAME.toml` |
+| `--center` | `f_sample / 4` | SA window center |
+| `--span` | `f_sample / 2` | SA window span |
+| `--rbw` | `100e3` | Resolution bandwidth (Hz) |
+| `--vbw` | `10e3` | Video bandwidth (Hz) |
+| `--noise-bw` | `span` | Integrated noise bandwidth used in the SNR formula |
+| `--ref` | `0.0` | SA reference level (dBm) |
+| `--settle` | `0.5` | DAC settling time after reprogramming (s) |
+| `--sa-settle` | `1.0` | SA settle delay between configure and sweep trigger (s) |
+| `--port` | config | Serial port override |
+| `--baudrate` | config | Baudrate override |
+| `--output` | `data/captures/sa_comprehensive_sweep.csv` | Output CSV path |
