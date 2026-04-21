@@ -175,6 +175,73 @@ def cmd_bias(args):
         sess.close()
 
 
+def cmd_prep(args):
+    """Run detect-port -> flash -> bias in one step, before the socket is connected."""
+    print("\n=== [1/3] detect-port ===")
+    cmd_detect_port(argparse.Namespace())
+
+    print("\n=== [2/3] flash ===")
+    cmd_flash(argparse.Namespace(
+        fqbn=args.fqbn,
+        sketch=args.sketch,
+        port=args.port,
+    ))
+
+    print("\n=== [3/3] bias ===")
+    cmd_bias(argparse.Namespace(
+        port=args.port,
+        baudrate=args.baudrate,
+        initialize_compliance=args.initialize_compliance,
+    ))
+
+    print("\nPrep complete. Safe to connect the socket now.")
+
+
+def cmd_legacy(args):
+    """
+    Run the legacy two-sketch workflow end-to-end:
+        1) detect-port
+        2) flash control sketch + bias   (socket DISCONNECTED)
+        3) pause for physical socket connection
+        4) flash sine_din_h sketch       (socket CONNECTED)
+    """
+    control_sketch = "legacy/sketch/Arduino_DAC_control_sketch"
+    sine_sketch    = "legacy/sketch/sine_din_h"
+
+    print("\n=== [1/4] detect-port ===")
+    cmd_detect_port(argparse.Namespace())
+
+    print(f"\n=== [2/4] flash control sketch ({control_sketch}) ===")
+    cmd_flash(argparse.Namespace(
+        fqbn=args.fqbn,
+        sketch=control_sketch,
+        port=args.port,
+    ))
+
+    print("\n=== [3/4] bias ===")
+    cmd_bias(argparse.Namespace(
+        port=args.port,
+        baudrate=args.baudrate,
+        initialize_compliance=args.initialize_compliance,
+    ))
+
+    print("\n>>> Connect the DUT socket now. <<<")
+    if not args.no_prompt:
+        try:
+            input("Press Enter after the socket is connected to continue to the sine sketch...")
+        except (EOFError, KeyboardInterrupt):
+            sys.exit("\nAborted before flashing sine sketch.")
+
+    print(f"\n=== [4/4] flash sine sketch ({sine_sketch}) ===")
+    cmd_flash(argparse.Namespace(
+        fqbn=args.fqbn,
+        sketch=sine_sketch,
+        port=args.port,
+    ))
+
+    print("\nLegacy run complete.")
+
+
 def cmd_health(args):
     cfg = _cfg()
     port = args.port or cfg["hardware"]["port"]
@@ -484,7 +551,12 @@ def cmd_sa_sfdr_sweep(args):
     import time
     from dacdemo.coherent_tone import find_coherent_bin
     from dacdemo.board_control import BoardSession
-    from dacdemo.siganalyzer_control import SASession, save_measurements_csv
+    from dacdemo.siganalyzer_control import (
+        SASession,
+        save_measurements_csv,
+        SFDR_SWEEP_FIELDNAMES,
+    )
+    from dacdemo.sfdr_analysis import expected_harmonics, classify_spur
 
     if args.sweep_config:
         set_sweep_config(args.sweep_config)
@@ -564,10 +636,41 @@ def cmd_sa_sfdr_sweep(args):
                         ref_level_dbm=ref_dbm,
                         sa_settle_s=sa_settle_s,
                     )
+                # Tolerance must cover the actual SA display-bin width of the
+                # sweep that produced these peaks (span/~1001 trace points).
+                # In single mode that's the full Nyquist span (~2.6 MHz/bin at
+                # f_s=4.19 GHz); in windowed mode each window is f_s/8 wide.
+                sweep_span = measurements.get("window_span_hz")
+                if sweep_span is None or not math.isfinite(sweep_span):
+                    sweep_span = measurements["span_hz"]
+                tol_hz = max(
+                    3 * sweep_span / 1001,
+                    2 * rbw_hz,
+                    dac_clock_hz / num_samples,
+                )
+                harmonics = expected_harmonics(measurements["fund_freq_hz"], dac_clock_hz)
+                spur_class = classify_spur(
+                    measurements["spur_freq_hz"],
+                    measurements["fund_freq_hz"],
+                    dac_clock_hz,
+                    tol_hz,
+                )
+                row = {
+                    "tone_hz_target":  tone_hz_target,
+                    "dac_clock_hz":    dac_clock_hz,
+                    **measurements,
+                    "spur_class":      spur_class,
+                    "sfdr_valid":      spur_class != "bin_split",
+                    "harmonic_tol_hz": tol_hz,
+                    "expected_h2_hz":  harmonics[2],
+                    "expected_h3_hz":  harmonics[3],
+                    "expected_h4_hz":  harmonics[4],
+                    "expected_h5_hz":  harmonics[5],
+                }
                 sfdr = measurements["sfdr_dbc"]
                 sfdr_str = f"{sfdr:.1f} dBc" if sfdr == sfdr else "nan (no spur found)"
-                print(f"{prefix}  SFDR={sfdr_str}")
-                save_measurements_csv({"tone_hz_target": tone_hz_target, **measurements}, output)
+                print(f"{prefix}  SFDR={sfdr_str}  spur={spur_class}")
+                save_measurements_csv(row, output, fieldnames=SFDR_SWEEP_FIELDNAMES)
     finally:
         board.close()
 
@@ -605,6 +708,34 @@ def build_parser():
     p.add_argument("--baudrate", type=int)
     p.add_argument("--initialize-compliance", action="store_true")
     p.set_defaults(func=cmd_bias)
+
+    p = sub.add_parser("prep",
+        help="Pre-connect prep: detect-port -> flash -> bias (run before attaching the socket)")
+    p.add_argument("--fqbn",
+        help="Firmware FQBN override (default: config firmware.fqbn)")
+    p.add_argument("--sketch",
+        help="Sketch path override (default: config firmware.sketch)")
+    p.add_argument("--port",
+        help="Serial port override (default: detected / config hardware.port)")
+    p.add_argument("--baudrate", type=int,
+        help="Baudrate override (default: config hardware.baudrate)")
+    p.add_argument("--initialize-compliance", action="store_true",
+        help="Forward to bias step: initialize compliance before setting voltages")
+    p.set_defaults(func=cmd_prep)
+
+    p = sub.add_parser("legacy",
+        help="Run the legacy two-sketch workflow: detect-port + flash control + bias, pause, then flash sine_din_h")
+    p.add_argument("--fqbn",
+        help="Firmware FQBN override (default: config firmware.fqbn)")
+    p.add_argument("--port",
+        help="Serial port override (default: detected / config hardware.port)")
+    p.add_argument("--baudrate", type=int,
+        help="Baudrate override (default: config hardware.baudrate)")
+    p.add_argument("--initialize-compliance", action="store_true",
+        help="Forward to bias step: initialize compliance before setting voltages")
+    p.add_argument("--no-prompt", action="store_true",
+        help="Skip the mid-run pause (for scripting; assumes socket is already connected)")
+    p.set_defaults(func=cmd_legacy)
 
     p = sub.add_parser("health")
     p.add_argument("--port")

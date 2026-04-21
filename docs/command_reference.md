@@ -33,6 +33,8 @@ You used to have to choose which sketch to flash. The new firmware handles both 
 | Sine auto-starts on Arduino boot | `dacdemo play-sine` |
 | Run both phases together | `dacdemo run-demo` |
 
+**Still need the original two-sketch legacy flow?** Use `dacdemo legacy`. It runs detect-port → flash `legacy/sketch/Arduino_DAC_control_sketch/` → bias, then pauses for you to physically connect the DUT socket, then flashes `legacy/sketch/sine_din_h/`. See the `legacy` section below.
+
 ---
 
 ## Config ownership
@@ -194,6 +196,27 @@ dacdemo bias --initialize-compliance
 ```
 Sets rail voltages from `config/dacdemo.toml` `[rails]`. The `--initialize-compliance`
 flag resets current limits before applying voltages.
+
+### Pre-connect wrapper — `dacdemo prep`
+
+```
+dacdemo prep --initialize-compliance
+```
+One-shot wrapper that runs `detect-port` → `flash` → `bias` with numbered banners at each step and prints `Prep complete. Safe to connect the socket now.` when finished. Same flags as the underlying commands (`--fqbn`, `--sketch`, `--port`, `--baudrate`, `--initialize-compliance`) — each omitted flag falls back to config. Intended for the pre-socket sequence; do not run with the DUT already seated.
+
+### Legacy two-sketch wrapper — `dacdemo legacy`
+
+```
+dacdemo legacy --initialize-compliance
+```
+Runs the original two-sketch workflow end-to-end:
+1. `detect-port`
+2. `flash legacy/sketch/Arduino_DAC_control_sketch/`
+3. `bias` (reads all rails from `[rails]`; same serial protocol as the unified firmware)
+4. Prints `>>> Connect the DUT socket now. <<<` and waits for Enter.
+5. `flash legacy/sketch/sine_din_h/` — the sine auto-runs in `loop()` after boot.
+
+Use `--no-prompt` for scripted runs (skips the pause; assumes the socket is already connected).
 
 ---
 
@@ -417,9 +440,9 @@ When no frequency arguments are given, frequencies are read from the active swee
 
 #### Measurement modes
 
-**Standard (default):** one wide-span sweep per frequency point. SA window is fixed at the full Nyquist band (center = `f_sample/4`, span = `f_sample/2`).
+**Standard (default):** one wide-span sweep per frequency point. SA window is fixed at the full Nyquist band (center = `f_sample/4`, span = `f_sample/2`). Marker 1 reports the highest peak (fundamental); marker 2 steps to the next-lower peak (worst spur).
 
-**Windowed (`--windowed`):** divides the Nyquist band into 4 equal sub-windows (each span = `f_sample/8`), runs one sweep per window, finds the highest peak in each, then computes SFDR from the two highest peaks across all windows. Provides 4× better frequency resolution at the same RBW — useful when a tone at a low frequency is split across adjacent bins in the wide-span view.
+**Windowed (`--windowed`):** divides the Nyquist band into 4 equal sub-windows (each span = `f_sample/8`), runs one sweep per window, finds the highest peak in each, then computes SFDR from the two highest peaks across all four windows. Provides 4× better frequency resolution at the same RBW — useful when a tone is split across adjacent SA display bins in the wide-span view.
 
 ```
 dacdemo sa-sfdr-sweep --windowed
@@ -428,24 +451,41 @@ dacdemo sa-sfdr-sweep --windowed --sa-settle 2.0
 
 The `--sa-settle` delay is inserted between configuring each SA window and triggering the sweep, giving the trace time to stabilize after a window change. Distinct from `--settle` (DAC settling after a frequency hop).
 
+**Spur classification (both modes).** After each SFDR reading, the CLI computes where the 2nd–5th harmonics of the measured fundamental would land (folded into the Nyquist band) and classifies the reported spur:
+
+| `spur_class` | Meaning |
+|---|---|
+| `harmonic_N` | Spur is within tolerance of the Nth-folded harmonic of the fundamental (closest order wins) |
+| `bin_split` | Spur is within tolerance of the fundamental — the calculation is corrupted by display-bin splitting, `sfdr_valid=False` |
+| `other` | Real peak but not a predicted harmonic (IMD, clock leakage, noise ridge, etc.) |
+| `unknown` | Spur is NaN (no second peak was found on the trace) |
+
+Tolerance = `max(3 × sweep_span / 1001, 2 × rbw_hz, 1 coherent FFT bin)`. `sweep_span` is the actual swept span (full Nyquist in single mode, `f_sample/8` per window in windowed mode), so windowed runs have a much tighter (~1.5 MHz) tolerance than single mode (~6 MHz at `f_sample = 4.19 GHz`).
+
 ---
 
 #### Output CSV
 
+Both modes write a single unified schema to `data/captures/sa_sfdr_sweep.csv`. If the existing file's header does not match the current schema (e.g., after a code update that changes columns), the old file is auto-renamed to `sa_sfdr_sweep.legacy-YYYYMMDDTHHMMSS.csv` and a fresh header is written. A `-N` counter suffix is appended if the same-second name is taken.
+
 | Column | Description |
 |---|---|
 | `timestamp` | ISO 8601 |
+| `mode` | `single` or `windowed` |
 | `tone_hz_target` | requested frequency (Hz) |
-| `center_hz` | SA window center (fixed Nyquist midpoint, or last window center in windowed mode) |
-| `span_hz` | SA window span |
-| `rbw_hz` | resolution bandwidth |
-| `vbw_hz` | video bandwidth |
-| `ref_level_dbm` | SA reference level |
-| `fund_freq_hz` | fundamental peak frequency |
-| `fund_amp_dbm` | fundamental peak amplitude |
-| `spur_freq_hz` | worst spur frequency (`nan` if no second peak found) |
-| `spur_amp_dbm` | worst spur amplitude (`nan` if no second peak found) |
-| `sfdr_dbc` | `fund_amp_dbm − spur_amp_dbm` (`nan` if no second peak found) |
+| `dac_clock_hz` | DAC `f_sample` used for harmonic-aliasing math |
+| `center_hz`, `span_hz` | SA window center / span. In windowed mode this describes the full Nyquist band (`f_sample/4`, `f_sample/2`) — the actual sweep is 4 sub-windows of `window_span_hz` |
+| `window_span_hz` | Width of each sub-window (windowed mode). `NaN` in single mode |
+| `n_windows` | `1` (single) or `4` (windowed) |
+| `rbw_hz`, `vbw_hz`, `ref_level_dbm` | SA configuration |
+| `fund_freq_hz`, `fund_amp_dbm` | Fundamental peak used in SFDR calc |
+| `spur_freq_hz`, `spur_amp_dbm` | Worst spur used in SFDR calc (`NaN` if no second peak) |
+| `sfdr_dbc` | `fund_amp_dbm − spur_amp_dbm` |
+| `spur_class` | `harmonic_N` / `bin_split` / `other` / `unknown` (see table above) |
+| `sfdr_valid` | `False` iff `spur_class == bin_split` |
+| `harmonic_tol_hz` | Tolerance used for classification |
+| `expected_h2_hz` … `expected_h5_hz` | Predicted folded-harmonic locations for the measured fundamental |
+| `peak_1_freq_hz`, `peak_1_amp_dbm` … `peak_4_freq_hz`, `peak_4_amp_dbm` | **Traceability.** In single mode: peak 1 = marker 1 (fund), peak 2 = marker 2 (spur), peaks 3–4 `NaN`. In windowed mode: peak N = window N's peak in window order (lowest center → highest), regardless of which ones won fund/spur after sorting |
 
 ---
 

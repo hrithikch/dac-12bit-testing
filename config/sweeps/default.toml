@@ -1,5 +1,4 @@
-# Sweep frequency list for sa-sfdr-sweep.
-# Frequencies are targets — they snap to the nearest coherent prime bin at runtime.
+# Sweep frequencies (Hz) — snapped to coherent prime bins
 frequencies = [
     102400000.0,
 ]

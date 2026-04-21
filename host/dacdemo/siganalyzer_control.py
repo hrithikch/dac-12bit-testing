@@ -20,6 +20,39 @@ import pyvisa
 from instruments.keysight_exa import KeysightEXA
 
 
+# Canonical column order for sa-sfdr-sweep CSV output. Both single and windowed
+# modes write rows with these exact keys so the file shape stays consistent.
+SFDR_SWEEP_FIELDNAMES = [
+    "timestamp",
+    "mode",
+    "tone_hz_target",
+    "dac_clock_hz",
+    "center_hz",
+    "span_hz",
+    "window_span_hz",
+    "n_windows",
+    "rbw_hz",
+    "vbw_hz",
+    "ref_level_dbm",
+    "fund_freq_hz",
+    "fund_amp_dbm",
+    "spur_freq_hz",
+    "spur_amp_dbm",
+    "sfdr_dbc",
+    "spur_class",
+    "sfdr_valid",
+    "harmonic_tol_hz",
+    "expected_h2_hz",
+    "expected_h3_hz",
+    "expected_h4_hz",
+    "expected_h5_hz",
+    "peak_1_freq_hz", "peak_1_amp_dbm",
+    "peak_2_freq_hz", "peak_2_amp_dbm",
+    "peak_3_freq_hz", "peak_3_amp_dbm",
+    "peak_4_freq_hz", "peak_4_amp_dbm",
+]
+
+
 class SASession:
     """
     Open session to a Keysight N9010B EXA Signal Analyzer.
@@ -101,11 +134,8 @@ class SASession:
         sa_settle_s: delay between configure and sweep trigger to let the SA
         trace stabilize on the new window settings (default 0 = no delay).
 
-        Returns a dict with keys:
-            center_hz, span_hz, rbw_hz, vbw_hz, ref_level_dbm,
-            fund_freq_hz, fund_amp_dbm,
-            spur_freq_hz, spur_amp_dbm,
-            sfdr_dbc
+        Returns a dict shaped to SFDR_SWEEP_FIELDNAMES (peak_1 = fund marker,
+        peak_2 = spur marker, peak_3/4 = NaN since single mode uses 2 markers).
         """
         self._drv.configure_spectrum_view(
             center_hz=center_hz,
@@ -119,12 +149,27 @@ class SASession:
         self._drv.single_sweep()
         result = self._drv.measure_sfdr()
         return {
-            "center_hz":     center_hz,
-            "span_hz":       span_hz,
-            "rbw_hz":        rbw_hz,
-            "vbw_hz":        vbw_hz,
-            "ref_level_dbm": ref_level_dbm,
-            **result,
+            "mode":           "single",
+            "center_hz":      center_hz,
+            "span_hz":        span_hz,
+            "window_span_hz": float("nan"),
+            "n_windows":      1,
+            "rbw_hz":         rbw_hz,
+            "vbw_hz":         vbw_hz,
+            "ref_level_dbm":  ref_level_dbm,
+            "fund_freq_hz":   result["fund_freq_hz"],
+            "fund_amp_dbm":   result["fund_amp_dbm"],
+            "spur_freq_hz":   result["spur_freq_hz"],
+            "spur_amp_dbm":   result["spur_amp_dbm"],
+            "sfdr_dbc":       result["sfdr_dbc"],
+            "peak_1_freq_hz": result["fund_freq_hz"],
+            "peak_1_amp_dbm": result["fund_amp_dbm"],
+            "peak_2_freq_hz": result["spur_freq_hz"],
+            "peak_2_amp_dbm": result["spur_amp_dbm"],
+            "peak_3_freq_hz": float("nan"),
+            "peak_3_amp_dbm": float("nan"),
+            "peak_4_freq_hz": float("nan"),
+            "peak_4_amp_dbm": float("nan"),
         }
 
     def measure_sfdr_windowed(
@@ -143,12 +188,13 @@ class SASession:
         Narrower span per window (dac_clock_hz/8) gives 4x better frequency
         resolution than a single full-band sweep at the same RBW.
 
-        Returns the same dict keys as measure_sfdr.
+        Returns a dict shaped to SFDR_SWEEP_FIELDNAMES; peak_1..peak_4 are the
+        per-window peaks in window order (peak_1 = lowest center, peak_4 = highest).
         """
         window_span = dac_clock_hz / 8
-        peaks = []
-        for i in range(4):
-            center = (2 * i + 1) * dac_clock_hz / 16
+        window_centers = [(2 * i + 1) * dac_clock_hz / 16 for i in range(4)]
+        window_peaks = []  # (freq, amp) per window, in window order
+        for center in window_centers:
             self._drv.configure_spectrum_view(
                 center_hz=center,
                 span_hz=window_span,
@@ -159,18 +205,29 @@ class SASession:
             if sa_settle_s > 0:
                 time.sleep(sa_settle_s)
             self._drv.single_sweep()
-            freq, amp = self._drv.measure_peak()
-            peaks.append((freq, amp))
+            window_peaks.append(self._drv.measure_peak())
 
-        peaks.sort(key=lambda p: p[1], reverse=True)
-        fund_freq, fund_amp = peaks[0]
-        spur_freq, spur_amp = peaks[1]
+        ranked = sorted(window_peaks, key=lambda p: p[1], reverse=True)
+        fund_freq, fund_amp = ranked[0]
+        spur_freq, spur_amp = ranked[1]
         return {
-            "fund_freq_hz": fund_freq,
-            "fund_amp_dbm": fund_amp,
-            "spur_freq_hz": spur_freq,
-            "spur_amp_dbm": spur_amp,
-            "sfdr_dbc":     fund_amp - spur_amp,
+            "mode":           "windowed",
+            "center_hz":      dac_clock_hz / 4,
+            "span_hz":        dac_clock_hz / 2,
+            "window_span_hz": window_span,
+            "n_windows":      4,
+            "rbw_hz":         rbw_hz,
+            "vbw_hz":         vbw_hz,
+            "ref_level_dbm":  ref_level_dbm,
+            "fund_freq_hz":   fund_freq,
+            "fund_amp_dbm":   fund_amp,
+            "spur_freq_hz":   spur_freq,
+            "spur_amp_dbm":   spur_amp,
+            "sfdr_dbc":       fund_amp - spur_amp,
+            "peak_1_freq_hz": window_peaks[0][0], "peak_1_amp_dbm": window_peaks[0][1],
+            "peak_2_freq_hz": window_peaks[1][0], "peak_2_amp_dbm": window_peaks[1][1],
+            "peak_3_freq_hz": window_peaks[2][0], "peak_3_amp_dbm": window_peaks[2][1],
+            "peak_4_freq_hz": window_peaks[3][0], "peak_4_amp_dbm": window_peaks[3][1],
         }
 
     def screenshot(self, path: Path) -> None:
@@ -184,16 +241,51 @@ class SASession:
         self._rm.close()
 
 
-def save_measurements_csv(row: dict, path: Path) -> None:
-    """Append a measurement row to a CSV file (creates with header if new)."""
+def save_measurements_csv(row: dict, path: Path, fieldnames: list | None = None) -> None:
+    """
+    Append a measurement row to a CSV file.
+
+    If fieldnames is provided, it pins the column order. When the existing file's
+    header does not match, the old file is auto-renamed to
+    <stem>.legacy-<YYYYMMDDTHHMMSS>.csv so the new schema can start fresh
+    without silently misaligning columns.
+
+    If fieldnames is None, the legacy behavior applies (fieldnames inferred
+    from the row's keys with a leading "timestamp" column).
+    """
     import datetime
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = ["timestamp"] + list(row.keys())
+    now = datetime.datetime.now()
+
+    if fieldnames is None:
+        fieldnames = ["timestamp"] + list(row.keys())
+    else:
+        fieldnames = list(fieldnames)
+
+    if path.exists():
+        with open(path, "r", newline="") as f:
+            existing_header = next(csv.reader(f), [])
+        if existing_header != fieldnames:
+            stamp = now.strftime("%Y%m%dT%H%M%S")
+            archive = path.with_name(f"{path.stem}.legacy-{stamp}{path.suffix}")
+            # Collision guard: bump with a counter if the same-second name exists.
+            counter = 1
+            while archive.exists():
+                archive = path.with_name(
+                    f"{path.stem}.legacy-{stamp}-{counter}{path.suffix}"
+                )
+                counter += 1
+            path.rename(archive)
+            print(f"[csv] schema changed - archived old file -> {archive.name}")
+
     write_header = not path.exists()
+    out_row = {"timestamp": now.isoformat(), **row}
+    # Drop unknown keys when fieldnames is pinned to avoid DictWriter raising.
+    out_row = {k: out_row.get(k, "") for k in fieldnames}
     with open(path, "a", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
         if write_header:
             w.writeheader()
-        w.writerow({"timestamp": datetime.datetime.now().isoformat(), **row})
+        w.writerow(out_row)
     print(f"Measurements -> {path}")

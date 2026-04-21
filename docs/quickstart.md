@@ -39,6 +39,13 @@ Generates the 256-sample 12-bit sine table from `f_out` and `f_sample`, saves to
 **`dacdemo health`**
 Reads voltage, shunt voltage, current, and power from all five rails via INA219. Read-only — safe without chip in socket.
 
+**`dacdemo prep`** — one-shot pre-connect wrapper: `detect-port` → `flash` → `bias`. Runs before the DUT socket is attached.
+```bash
+dacdemo prep --initialize-compliance
+```
+
+**`dacdemo legacy`** — runs the original two-sketch workflow end-to-end: detect → flash `legacy/sketch/Arduino_DAC_control_sketch/` → bias → pause for socket connection → flash `legacy/sketch/sine_din_h/`. Use `--no-prompt` to skip the pause.
+
 **`dacdemo bias`**
 Sends `SET_VOLTAGE` with all rail targets from `[rails]` in config. Reads back each voltage to confirm.
 ```
@@ -114,7 +121,7 @@ dacdemo sa-sfdr-sweep --sweep-config high_freq
 dacdemo sa-sfdr-sweep --windowed --sa-settle 1.5
 ```
 
-Target frequencies snap to the nearest coherent prime bin. Duplicate bins are skipped. Output: `data/captures/sa_sfdr_sweep.csv` (12 columns including `tone_hz_target` and `sfdr_dbc`). Use `--windowed` when the fundamental tone falls below ~200 MHz and appears split across bins in wide-span mode. See `docs/command_reference.md` for full column list and options.
+Target frequencies snap to the nearest coherent prime bin. Duplicate bins are skipped. Output: `data/captures/sa_sfdr_sweep.csv` — 30-column unified schema shared by both modes, including `sfdr_dbc`, `spur_class` (`harmonic_N` / `bin_split` / `other`), `sfdr_valid`, expected-harmonic frequencies, and per-marker / per-window peak traceability. If the file's header doesn't match the current schema (e.g., after a code update) it is auto-archived as `sa_sfdr_sweep.legacy-<timestamp>.csv` before writing. Use `--windowed` when the fundamental is split across SA display bins in wide-span mode. See `docs/command_reference.md` for the full column list and options.
 
 ---
 
