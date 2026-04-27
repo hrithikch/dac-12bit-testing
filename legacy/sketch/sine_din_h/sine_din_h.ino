@@ -14,7 +14,7 @@ const int SEL_EXT_DIN = 5;
 
 // GENERALIZED FREQUENCY SETTINGS (in Hz)
 // Defined as double to prevent 32-bit integer overflow at GHz frequencies
-const double F_OUT       = 266240000; // Desired Sine Wave Frequency: 1.015808 GHz
+const double F_OUT       = 471040000.0; // Desired Sine Wave Frequency: 1.015808 GHz
 const double F_SAMPLE    = 5.24288e9; // DAC Sampling Rate: 8.388608 GHz
 const int    NUM_SAMPLES = 256;        // Number of samples in the buffer
 

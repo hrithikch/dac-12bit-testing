@@ -130,6 +130,14 @@ void setup() {
 
   Serial.begin(USB_BAUD_RATE);
 
+#if defined(WIRE_HAS_TIMEOUT)
+  // If the rail-monitor I2C bus is wedged, fail fast instead of hanging in setup().
+  Wire.setWireTimeout(25000, true);
+#if defined(ARDUINO_ARCH_SAM) || defined(ARDUINO_ARCH_MBED)
+  Wire1.setWireTimeout(25000, true);
+#endif
+#endif
+
   pinMode(led_pin, OUTPUT);
 
   pinMode(SPI_DOUT, INPUT_PULLDOWN);

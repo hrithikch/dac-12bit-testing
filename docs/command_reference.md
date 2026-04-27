@@ -44,8 +44,8 @@ You used to have to choose which sketch to flash. The new firmware handles both 
 | Key | Section | Kind | Set by |
 |---|---|---|---|
 | `fs_app` | `[coherent_tone]` | input | edit TOML or `calc --fs-app` |
-| `x_seed` | `[coherent_tone]` | input | edit TOML, `calc --x-seed`, or `calc --from-fout` |
-| `fin` | `[coherent_tone]` | input | edit TOML or `calc --from-fout` |
+| `x_seed` | `[coherent_tone]` | input | edit TOML, `calc --x-seed`, or `calc --f-out` |
+| `fin` | `[coherent_tone]` | input | edit TOML or `calc --f-out` |
 | `num_samples` | `[dac]` | hardware constant | edit TOML only |
 | `f_sample` | `[dac]` | **derived** | `dacdemo calc` |
 | `f_out` | `[dac]` | **derived** | `dacdemo calc` |
@@ -142,7 +142,7 @@ dacdemo calc --x-seed 7
 
 **Back-calculation — start from a desired f_out:**
 ```
-dacdemo calc --from-fout 61.44e6
+dacdemo calc --f-out 61.44e6
 # finds the prime bin closest to 61.44 MHz given current f_sample
 # updates x_seed and fin in [coherent_tone], then runs forward calc
 # f_sample + f_out written back to [dac]
@@ -151,6 +151,14 @@ dacdemo calc --from-fout 61.44e6
 **Override fs_app and write to TOML:**
 ```
 dacdemo calc --fs-app 5000
+```
+
+**Set f_sample and f_out together:**
+```
+dacdemo calc --f-sample 5.24288e9 --f-out 102.4e6
+# back-calculates fs_app from f_sample
+# back-calculates x_seed and fin from the requested f_out at that sample rate
+# writes the nearest coherent f_sample + f_out pair back to [dac]
 ```
 
 ```
@@ -205,7 +213,9 @@ Loads and enables the sine pattern in one command. Equivalent to `dac_load_sine`
 dacdemo bias --initialize-compliance
 ```
 Sets rail voltages from `config/dacdemo.toml` `[rails]`. The `--initialize-compliance`
-flag resets current limits before applying voltages.
+flag resets current limits before applying voltages. Before opening the board serial link,
+the command also ensures the bench PSU in `[instruments].psu_addr` is set to `[psu]`
+(`channel`, `voltage`, `current_limit`) and enables that output if needed.
 
 ### Pre-connect wrapper — `dacdemo prep`
 
@@ -418,7 +428,7 @@ Change RBW/VBW and also save a PNG screenshot.
 
 Iterates the DAC output tone across a set of target frequencies, reprograms the DAC at each step, measures SFDR from the signal analyzer, and appends one row per step to a CSV.
 
-**Frequency quantization:** target frequencies are first clipped to Nyquist (`f_sample / 2`), then snapped to the nearest in-band prime FFT bin: `tone_hz_actual = prime_bin × f_sample / num_samples`. The requested target and the actual frequency are both recorded in the CSV. Targets that map to the same prime bin are skipped.
+**Frequency quantization:** targets inside Nyquist are snapped to the nearest in-band prime FFT bin: `tone_hz_actual = prime_bin × f_sample / num_samples`. Targets that land just barely past Nyquist (within half of one coherent-bin width) are clipped to Nyquist first, then snapped. Targets that are fully outside the alias-free range are skipped with a warning instead of being measured. The requested target and the actual frequency are both recorded in the CSV. Targets that map to the same prime bin are skipped.
 
 This means the sweep holds `f_sample` fixed and `num_samples` fixed, while the effective sweep variable is the coherent bin index `k`. The user supplies desired `f_out` targets; the CLI converts each one into the nearest coherent prime bin and uses that bin's actual tone.
 
@@ -467,7 +477,7 @@ Generates targets `[200, 250, 300, …, 500]` MHz. All three arguments are requi
 ```
 dacdemo sa-sfdr-sweep --freqs 200e6 266e6 400e6 471e6
 ```
-Each target is clipped to Nyquist, then snapped to the nearest coherent in-band prime bin. Duplicates are dropped, meaning two requested frequencies that land on the same `k` produce one measurement point. The resulting actual frequencies are written to the currently active sweep config file (`config/sweeps/{config}.toml`) for reuse.
+Each target is checked against Nyquist. In-band values are snapped directly to the nearest coherent in-band prime bin. Values on the Nyquist edge are clipped first, then snapped. Values that are fully outside the alias-free range are skipped with a warning. Duplicates are dropped, meaning two requested frequencies that land on the same `k` produce one measurement point. The resulting actual frequencies are written to the currently active sweep config file (`config/sweeps/{config}.toml`) for reuse.
 
 *Option 3 — active sweep config file:*
 ```
@@ -554,7 +564,7 @@ Both modes write a single unified schema to `data/captures/sa_sfdr_sweep.csv`. I
 
 Iterates the DAC output tone across a set of target frequencies, reprograms the DAC at each step, measures SNR from the signal analyzer, and appends one row per step to a CSV.
 
-Frequency selection and coherent-bin snapping behave exactly like `sa-sfdr-sweep`: use `--freq-start/stop/step`, `--freqs`, or the active sweep config file. Targets above Nyquist are clipped before coherent-bin selection.
+Frequency selection and coherent-bin snapping behave exactly like `sa-sfdr-sweep`: use `--freq-start/stop/step`, `--freqs`, or the active sweep config file. Near-edge targets are clipped to Nyquist before coherent-bin selection, while fully out-of-range targets are skipped with a warning.
 
 Like `sa-sfdr-sweep`, this keeps `f_sample` fixed and `num_samples` fixed during the run, and sweeps by selecting different coherent prime bins `k` for the requested `f_out` values.
 Before the first measurement point, it also programs the R&S siggen to `[dac].f_sample`.
@@ -624,7 +634,8 @@ Harmonics are searched near the predicted aliased 2nd-5th harmonic locations, `S
 Frequency selection uses the same rule as the other sweep commands:
 - hold `f_sample` fixed
 - hold `num_samples` fixed
-- clip requested `f_out` to Nyquist
+- clip only Nyquist-edge `f_out` values
+- skip fully out-of-range `f_out` values with a warning
 - snap to the nearest coherent in-band prime bin `k`
 - generate `f_out_actual = k × f_sample / num_samples`
 
@@ -649,7 +660,7 @@ Key columns:
 | Option | Default | Notes |
 |---|---|---|
 | `--freq-start/stop/step` | - | Linear range; all three required if used |
-| `--freqs HZ [HZ ...]` | - | Arbitrary list; clipped to Nyquist, snapped to coherent bins, and saved to active sweep config |
+| `--freqs HZ [HZ ...]` | - | Arbitrary list; edge-clipped when needed, out-of-range targets skipped, and coherent actuals saved to active sweep config |
 | `--sweep-config NAME` | - | Switch active sweep config to `config/sweeps/NAME.toml` |
 | `--center` | `f_sample / 4` | SA window center |
 | `--span` | `f_sample / 2` | SA window span |

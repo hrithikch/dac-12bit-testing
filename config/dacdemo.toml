@@ -7,8 +7,8 @@ port = "COM6"
 baudrate = 115200
 
 [dac]
-f_out = 266.24e6
-f_sample = 5.24288e9
+f_out = 471040000.0
+f_sample = 5242880000.0    
 num_samples = 256
 
 [rails]
@@ -20,14 +20,20 @@ VCM = 0.65
 
 [coherent_tone]
 fs_app = 5000.0
-x_seed = 4
+x_seed = 23
 fin    = "low"    # "low" or "high" — which prime bin sets f_out
 
 [instruments]
 siggen_addr = "TCPIP0::192.168.10.159::hislip0::INSTR"   # R&S SMA100B (HiSLIP)
 scope_addr  = "TCPIP0::S254A-1246709::hislip0::INSTR"  # Keysight MSOS054A (HiSLIP) — update IP
 sa_addr     = "TCPIP0::K-N9010B-00524::hislip0::INSTR"  # Keysight N9010B EXA (HiSLIP) — update IP
+psu_addr    = "TCPIP0::192.168.10.213::inst0::INSTR"  # Keysight E363xx PSU (VXI-11) — update IP
 siggen_level = "700 mV"
+
+[psu]
+channel = 3
+voltage = 7.0
+current_limit = 0.8
 
 [paths]
 sine_output = "data/generated_patterns/sine_codes.json"

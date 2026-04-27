@@ -320,6 +320,8 @@ def print_results(all_instruments: list[DiscoveredInstrument]) -> None:
         "MSO":    "scope_addr",
         "MXR":    "scope_addr",
         "SMA100": "siggen_addr",
+        "E363":   "psu_addr",
+        "E364":   "psu_addr",
     }
     assigned: dict[str, str] = {}
     for inst in all_instruments:
@@ -334,11 +336,11 @@ def print_results(all_instruments: list[DiscoveredInstrument]) -> None:
 
     if assigned:
         print()
-        for key in ("siggen_addr", "scope_addr", "sa_addr"):
+        for key in ("siggen_addr", "scope_addr", "sa_addr", "psu_addr"):
             if key in assigned:
                 print(f"  {key} = \"{assigned[key]}\"")
         for key, addr in assigned.items():
-            if key not in ("siggen_addr", "scope_addr", "sa_addr"):
+            if key not in ("siggen_addr", "scope_addr", "sa_addr", "psu_addr"):
                 print(f"  {key} = \"{addr}\"")
     else:
         print("\n  (No recognized project instruments found)")

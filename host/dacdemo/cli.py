@@ -1,7 +1,9 @@
 import argparse
 import json
+import math
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import serial.tools.list_ports
@@ -10,13 +12,177 @@ from dacdemo.board_control import BoardSession, list_ports
 from dacdemo.coherent_tone import build_plan
 from dacdemo.sine_gen import generate_sine_codes
 from dacdemo import config as _config
-from dacdemo.config import set_dac_freq, set_f_sample, set_coherent_params, set_fs_app, set_siggen_addr, set_sa_addr, set_scope_addr, set_sweep_frequencies, set_sweep_config
+from dacdemo.config import set_dac_freq, set_f_sample, set_coherent_params, set_fs_app, set_psu_addr, set_siggen_addr, set_sa_addr, set_scope_addr, set_sweep_frequencies, set_sweep_config
 
 ADAFRUIT_VID = 0x239A
+_NYQUIST_EDGE_TOLERANCE_BINS = 0.5
 
 
 def _cfg():
     return _config.load()
+
+
+def _coherent_bin_width_hz(f_sample: float, num_samples: int) -> float:
+    return f_sample / num_samples
+
+
+def _nyquist_edge_margin_hz(f_sample: float, num_samples: int) -> float:
+    return _coherent_bin_width_hz(f_sample, num_samples) * _NYQUIST_EDGE_TOLERANCE_BINS
+
+
+def _classify_target_frequency(requested_hz: float, f_sample: float, num_samples: int) -> dict:
+    nyquist_hz = f_sample / 2
+    edge_margin_hz = _nyquist_edge_margin_hz(f_sample, num_samples)
+
+    if not math.isfinite(requested_hz):
+        return {
+            "status": "excluded_invalid",
+            "requested_hz": requested_hz,
+            "clipped_hz": None,
+            "nyquist_hz": nyquist_hz,
+            "edge_margin_hz": edge_margin_hz,
+        }
+    if requested_hz < -edge_margin_hz:
+        return {
+            "status": "excluded_low",
+            "requested_hz": requested_hz,
+            "clipped_hz": None,
+            "nyquist_hz": nyquist_hz,
+            "edge_margin_hz": edge_margin_hz,
+        }
+    if requested_hz < 0.0:
+        return {
+            "status": "clipped_low",
+            "requested_hz": requested_hz,
+            "clipped_hz": 0.0,
+            "nyquist_hz": nyquist_hz,
+            "edge_margin_hz": edge_margin_hz,
+        }
+    if requested_hz <= nyquist_hz:
+        return {
+            "status": "inband",
+            "requested_hz": requested_hz,
+            "clipped_hz": requested_hz,
+            "nyquist_hz": nyquist_hz,
+            "edge_margin_hz": edge_margin_hz,
+        }
+    if requested_hz <= nyquist_hz + edge_margin_hz:
+        return {
+            "status": "clipped_high",
+            "requested_hz": requested_hz,
+            "clipped_hz": nyquist_hz,
+            "nyquist_hz": nyquist_hz,
+            "edge_margin_hz": edge_margin_hz,
+        }
+    return {
+        "status": "excluded_high",
+        "requested_hz": requested_hz,
+        "clipped_hz": None,
+        "nyquist_hz": nyquist_hz,
+        "edge_margin_hz": edge_margin_hz,
+    }
+
+
+def _required_alias_free_fs_hz(requested_hz: float) -> float | None:
+    if not math.isfinite(requested_hz) or requested_hz <= 0:
+        return None
+    return 2.0 * requested_hz
+
+
+def _prompt_yes_no(question: str, default: bool = False) -> bool:
+    if not sys.stdin.isatty():
+        print(f"{question} [{'Y/n' if default else 'y/N'}] non-interactive session; leaving configuration unchanged.")
+        return default
+
+    suffix = " [Y/n] " if default else " [y/N] "
+    while True:
+        reply = input(question + suffix).strip().lower()
+        if not reply:
+            return default
+        if reply in {"y", "yes"}:
+            return True
+        if reply in {"n", "no"}:
+            return False
+        print("Please answer yes or no.")
+
+
+def _update_sample_rate_and_siggen(f_sample_hz: float, cfg: dict) -> dict:
+    from dacdemo.siggen_control import SiggenSession
+
+    fs_app_back = f_sample_hz / 2 ** 20
+    set_f_sample(f_sample_hz)
+    set_fs_app(fs_app_back)
+    print(f"Config updated: f_sample = {f_sample_hz / 1e9:.6f} GHz, fs_app = {fs_app_back:.6f}")
+    print("Valid coherent f_out values for new f_sample:")
+    _coherent_tone_summary(f_sample_hz, cfg["dac"]["num_samples"], cfg["coherent_tone"])
+    print()
+
+    siggen_addr = cfg["instruments"]["siggen_addr"]
+    with SiggenSession(siggen_addr) as sg:
+        sg.set_clock(f_sample_hz, _siggen_level_from_cfg(cfg))
+    print(f"siggen updated: {f_sample_hz / 1e9:.6f} GHz")
+    return _cfg()
+
+
+def _warn_clipped_frequency(context: str, requested_hz: float, clipped_hz: float, edge_margin_hz: float) -> None:
+    print(
+        f"WARNING: {context} {requested_hz / 1e6:.4f} MHz is on the Nyquist edge; "
+        f"clipping to {clipped_hz / 1e6:.4f} MHz before coherent-bin selection "
+        f"(edge window {edge_margin_hz / 1e6:.4f} MHz)."
+    )
+
+
+def _maybe_raise_sample_rate_for_single_tone(context: str, requested_hz: float, cfg: dict) -> dict | None:
+    required_fs_hz = _required_alias_free_fs_hz(requested_hz)
+    if required_fs_hz is None:
+        return None
+
+    answer = _prompt_yes_no(
+        f"{context} {requested_hz / 1e6:.4f} MHz is outside Nyquist. "
+        f"Use f_sample = {required_fs_hz / 1e9:.6f} GHz and update the siggen now?",
+        default=False,
+    )
+    if not answer:
+        return None
+    return _update_sample_rate_and_siggen(required_fs_hz, cfg)
+
+
+def _summarize_out_of_range_targets(excluded: list[dict], f_sample: float) -> None:
+    nyquist_hz = f_sample / 2
+    print(
+        f"WARNING: {len(excluded)} requested target(s) are outside the alias-free range "
+        f"(0 to {nyquist_hz / 1e6:.4f} MHz) and will not be measured:"
+    )
+    for item in excluded:
+        requested_hz = item["requested_hz"]
+        status = item["status"]
+        if status == "excluded_high":
+            reason = "above Nyquist"
+        elif status == "excluded_low":
+            reason = "below 0 Hz"
+        else:
+            reason = "invalid"
+        rendered = f"{requested_hz / 1e6:.4f} MHz" if math.isfinite(requested_hz) else repr(requested_hz)
+        print(f"  - {rendered} ({reason})")
+
+
+def _maybe_raise_sample_rate_for_sweep(command_name: str, excluded: list[dict], cfg: dict) -> dict | None:
+    requested_max_hz = max(
+        (item["requested_hz"] for item in excluded if item["status"] == "excluded_high"),
+        default=None,
+    )
+    required_fs_hz = _required_alias_free_fs_hz(requested_max_hz) if requested_max_hz is not None else None
+    if required_fs_hz is None:
+        return None
+
+    answer = _prompt_yes_no(
+        f"{command_name}: the highest skipped target needs f_sample >= {required_fs_hz / 1e9:.6f} GHz "
+        f"to stay alias-free. Update config and siggen now, then continue with that rate?",
+        default=False,
+    )
+    if not answer:
+        return None
+    return _update_sample_rate_and_siggen(required_fs_hz, cfg)
 
 
 def cmd_list_ports(_args):
@@ -135,6 +301,11 @@ def cmd_detect_instruments(args):
             set_sa_addr,
         ),
         (
+            lambda inst: inst.label and "KEYSIGHT" in inst.label.upper() and "POWER SUPPLY" in inst.label.upper(),
+            "Keysight power supply",
+            set_psu_addr,
+        ),
+        (
             lambda inst: inst.label and ("MSO" in inst.label.upper() or "MXR" in inst.label.upper()),
             "Keysight oscilloscope",
             set_scope_addr,
@@ -158,8 +329,50 @@ def cmd_detect_instruments(args):
     print(f"\nDiscovery completed in {time.time() - t0:.1f} s")
 
 
+def _discover_psu_addr() -> str | None:
+    from dacdemo.discover import discover_via_visa, visa_string_hint
+
+    matches = []
+    for inst in discover_via_visa(timeout_ms=3000):
+        label = (inst.label or "").upper()
+        if "KEYSIGHT" not in label or "POWER SUPPLY" not in label:
+            continue
+        addr = inst.address if inst.source == "VISA" else (visa_string_hint(inst) or inst.address)
+        matches.append(addr)
+    return matches[0] if matches else None
+
+
+def _ensure_psu_ready(cfg: dict) -> None:
+    from dacdemo.psu_control import PsuSession
+
+    instruments_cfg = cfg["instruments"]
+    psu_cfg = cfg["psu"]
+    addr = instruments_cfg.get("psu_addr")
+    if not addr:
+        addr = _discover_psu_addr()
+        if not addr:
+            raise RuntimeError(
+                "No Keysight PSU found for bias step. Set [instruments].psu_addr or run detect-instruments."
+            )
+        set_psu_addr(addr)
+        cfg = _cfg()
+        instruments_cfg = cfg["instruments"]
+        psu_cfg = cfg["psu"]
+
+    with PsuSession(addr) as psu:
+        idn = psu.idn()
+        result = psu.ensure_channel(
+            channel=psu_cfg["channel"],
+            voltage=psu_cfg["voltage"],
+            current_limit=psu_cfg["current_limit"],
+        )
+        print({"psu_addr": addr, "psu_idn": idn})
+        print({"psu_ready": result})
+
+
 def cmd_bias(args):
     cfg = _cfg()
+    _ensure_psu_ready(cfg)
     port = args.port or cfg["hardware"]["port"]
     baudrate = args.baudrate or cfg["hardware"]["baudrate"]
     rails = cfg["rails"]
@@ -183,7 +396,9 @@ def cmd_prep(args):
     print("\n=== [2/4] calc ===")
     cmd_calc(argparse.Namespace(
         fs_app=None,
+        f_sample=None,
         x_seed=None,
+        f_out=None,
         from_fout=None,
     ))
 
@@ -194,12 +409,32 @@ def cmd_prep(args):
         port=args.port,
     ))
 
+    if args.port is None:
+        # SAMD boards can take a moment to re-enumerate onto a new COM port after upload.
+        time.sleep(2.0)
+        print("\n[post-flash] re-detecting port...")
+        cmd_detect_port(argparse.Namespace())
+
     print("\n=== [4/4] bias ===")
-    cmd_bias(argparse.Namespace(
+    bias_args = argparse.Namespace(
         port=args.port,
         baudrate=args.baudrate,
         initialize_compliance=args.initialize_compliance,
-    ))
+    )
+    try:
+        cmd_bias(bias_args)
+    except Exception as exc:
+        if args.port is not None:
+            raise
+        print(f"[bias] first attempt failed: {exc}")
+        print("[bias] waiting for board to settle, then re-detecting port and retrying once...")
+        time.sleep(3.0)
+        cmd_detect_port(argparse.Namespace())
+        cmd_bias(argparse.Namespace(
+            port=None,
+            baudrate=args.baudrate,
+            initialize_compliance=args.initialize_compliance,
+        ))
 
     print("\nPrep complete. Safe to connect the socket now.")
 
@@ -269,31 +504,76 @@ def cmd_health(args):
 
 
 def cmd_calc(args):
-    from dacdemo.coherent_tone import find_coherent_bin
+    from dacdemo.coherent_tone import find_coherent_inband_bin
 
     cfg = _cfg()
     ct  = cfg["coherent_tone"]
     dac = cfg["dac"]
 
-    fs_app = args.fs_app or ct["fs_app"]
+    fs_app_arg = getattr(args, "fs_app", None)
+    f_sample_arg = getattr(args, "f_sample", None)
+    x_seed_arg = getattr(args, "x_seed", None)
+    f_out_arg = getattr(args, "f_out", None)
+    from_fout_arg = getattr(args, "from_fout", None)
+
+    if fs_app_arg is not None and f_sample_arg is not None:
+        raise SystemExit("Use only one of --fs-app or --f-sample.")
+
+    fs_app = ct["fs_app"]
+    if fs_app_arg is not None:
+        fs_app = fs_app_arg
+    elif f_sample_arg is not None:
+        fs_app = f_sample_arg / 2 ** 20
     n      = dac["num_samples"]          # single source of truth — not duplicated in [coherent_tone]
-    x_seed = args.x_seed or ct["x_seed"]
+    x_seed = x_seed_arg or ct["x_seed"]
     fin    = ct["fin"]
 
-    if args.fs_app is not None:
-        set_fs_app(args.fs_app)
-        print(f"config updated: fs_app={args.fs_app}")
-    if args.x_seed is not None:
+    if fs_app_arg is not None:
+        set_fs_app(fs_app_arg)
+        print(f"config updated: fs_app={fs_app_arg}")
+    if f_sample_arg is not None:
+        set_fs_app(fs_app)
+        print(f"config updated: f_sample={f_sample_arg} Hz -> fs_app={fs_app}")
+    if x_seed_arg is not None:
         set_coherent_params(x_seed, fin)
         print(f"config updated: x_seed={x_seed}")
 
-    if args.from_fout is not None:
-        # Back-calculation: find the prime bin closest to the desired f_out,
-        # then update [coherent_tone] so the forward calc produces consistent state.
+    f_out_target = f_out_arg if f_out_arg is not None else from_fout_arg
+    if f_out_target is not None:
         fs_actual_current = build_plan(fs_app=fs_app, n=n, x_seed=x_seed, fin=fin).fs_actual
-        x_seed, fin = find_coherent_bin(args.from_fout, fs_actual_current, n)
+        classification = _classify_target_frequency(f_out_target, fs_actual_current, n)
+        if classification["status"].startswith("excluded"):
+            refreshed_cfg = _maybe_raise_sample_rate_for_single_tone("Requested f_out", f_out_target, cfg)
+            if refreshed_cfg is None:
+                raise SystemExit("Aborted to avoid aliasing. Increase f_sample and try again.")
+            cfg = refreshed_cfg
+            ct = cfg["coherent_tone"]
+            dac = cfg["dac"]
+            fs_app = ct["fs_app"]
+            n = dac["num_samples"]
+            fs_actual_current = dac["f_sample"]
+            classification = _classify_target_frequency(f_out_target, fs_actual_current, n)
+
+        clipped_target_hz = classification["clipped_hz"]
+        if classification["status"].startswith("clipped"):
+            _warn_clipped_frequency(
+                "Requested f_out",
+                f_out_target,
+                clipped_target_hz,
+                classification["edge_margin_hz"],
+            )
+
+        # Back-calculate: map the requested or edge-clipped frequency to the
+        # nearest coherent in-band prime bin, then update [coherent_tone].
+        x_seed, fin, clipped_target_hz = find_coherent_inband_bin(clipped_target_hz, fs_actual_current, n)
         set_coherent_params(x_seed, fin)
-        print(f"Back-calc: x_seed={x_seed}, fin={fin!r}  (target {args.from_fout/1e6:.4f} MHz)")
+        if clipped_target_hz != f_out_target:
+            print(
+                f"Back-calc: x_seed={x_seed}, fin={fin!r}  "
+                f"(target {f_out_target/1e6:.4f} MHz, clipped {clipped_target_hz/1e6:.4f} MHz)"
+            )
+        else:
+            print(f"Back-calc: x_seed={x_seed}, fin={fin!r}  (target {f_out_target/1e6:.4f} MHz)")
 
     plan = build_plan(fs_app=fs_app, n=n, x_seed=x_seed, fin=fin)
     print(json.dumps(plan.__dict__, indent=2))
@@ -306,7 +586,7 @@ def cmd_calc(args):
     print(f"config updated: f_out={plan.f_out/1e6:.4f} MHz, f_sample={plan.fs_actual/1e9:.6f} GHz")
     print(output_path)
 
-    if args.fs_app is not None:
+    if fs_app_arg is not None or f_sample_arg is not None:
         from dacdemo.siggen_control import SiggenSession
         siggen_addr = cfg["instruments"]["siggen_addr"]
         level = cfg["instruments"].get("siggen_level", "0 dBm")
@@ -349,6 +629,7 @@ def cmd_play_sine(args):
 
 def cmd_run_demo(args):
     cfg = _cfg()
+    _ensure_psu_ready(cfg)
     port = args.port or cfg["hardware"]["port"]
     baudrate = args.baudrate or cfg["hardware"]["baudrate"]
     f_out = args.f_out or cfg["dac"]["f_out"]
@@ -608,13 +889,26 @@ def _requested_sweep_targets(args, cfg: dict) -> tuple[list[float], bool]:
     return (list(targets), False)
 
 
-def _resolve_sweep_points(requested_targets: list[float], dac_clock_hz: float, num_samples: int) -> list[dict]:
+def _resolve_sweep_points(requested_targets: list[float], dac_clock_hz: float, num_samples: int) -> tuple[list[dict], list[dict]]:
     from dacdemo.coherent_tone import find_coherent_inband_bin
 
     points = []
+    excluded = []
     seen_bins = set()
     for requested_hz in requested_targets:
-        prime_bin, _fin, clipped_hz = find_coherent_inband_bin(requested_hz, dac_clock_hz, num_samples)
+        classification = _classify_target_frequency(requested_hz, dac_clock_hz, num_samples)
+        if classification["status"].startswith("excluded"):
+            excluded.append(classification)
+            continue
+        clipped_hz = classification["clipped_hz"]
+        if classification["status"].startswith("clipped"):
+            _warn_clipped_frequency(
+                "Sweep target",
+                requested_hz,
+                clipped_hz,
+                classification["edge_margin_hz"],
+            )
+        prime_bin, _fin, clipped_hz = find_coherent_inband_bin(clipped_hz, dac_clock_hz, num_samples)
         actual_hz = prime_bin * dac_clock_hz / num_samples
         if prime_bin in seen_bins:
             continue
@@ -625,7 +919,7 @@ def _resolve_sweep_points(requested_targets: list[float], dac_clock_hz: float, n
             "tone_hz_actual": actual_hz,
             "coherent_bin_k": prime_bin,
         })
-    return points
+    return points, excluded
 
 
 def cmd_sa_sfdr_sweep(args):
@@ -662,7 +956,26 @@ def cmd_sa_sfdr_sweep(args):
     output       = Path(args.output) if args.output else Path("data/captures/sa_sfdr_sweep.csv")
 
     requested_targets, persist_actuals = _requested_sweep_targets(args, cfg)
-    points = _resolve_sweep_points(requested_targets, dac_clock_hz, num_samples)
+    points, excluded = _resolve_sweep_points(requested_targets, dac_clock_hz, num_samples)
+    if excluded:
+        _summarize_out_of_range_targets(excluded, dac_clock_hz)
+        refreshed_cfg = _maybe_raise_sample_rate_for_sweep("sa-sfdr-sweep", excluded, cfg)
+        if refreshed_cfg is not None:
+            cfg = refreshed_cfg
+            dac_clock_hz = cfg["dac"]["f_sample"]
+            num_samples = cfg["dac"]["num_samples"]
+            siggen_addr = cfg["instruments"]["siggen_addr"]
+            sa_addr = cfg["instruments"]["sa_addr"]
+            siggen_level = _siggen_level_from_cfg(cfg)
+            port = args.port or cfg["hardware"]["port"]
+            baudrate = args.baudrate or cfg["hardware"]["baudrate"]
+            center_hz = args.center if args.center is not None else dac_clock_hz / 4
+            span_hz = args.span if args.span is not None else dac_clock_hz / 2
+            points, excluded = _resolve_sweep_points(requested_targets, dac_clock_hz, num_samples)
+        if excluded:
+            print(f"[sweep] continuing with {len(points)} in-band point(s); skipped {len(excluded)} out-of-range target(s).")
+    if not points:
+        raise SystemExit("No alias-free sweep points remain. Increase f_sample and try again.")
     if persist_actuals:
         set_sweep_frequencies([point["tone_hz_actual"] for point in points])
         print(f"[sweep] frequencies updated in config ({len(points)} points).")
@@ -778,7 +1091,27 @@ def cmd_sa_snr_sweep(args):
     output = Path(args.output) if args.output else Path("data/captures/sa_snr_sweep.csv")
 
     requested_targets, persist_actuals = _requested_sweep_targets(args, cfg)
-    points = _resolve_sweep_points(requested_targets, dac_clock_hz, num_samples)
+    points, excluded = _resolve_sweep_points(requested_targets, dac_clock_hz, num_samples)
+    if excluded:
+        _summarize_out_of_range_targets(excluded, dac_clock_hz)
+        refreshed_cfg = _maybe_raise_sample_rate_for_sweep("sa-snr-sweep", excluded, cfg)
+        if refreshed_cfg is not None:
+            cfg = refreshed_cfg
+            dac_clock_hz = cfg["dac"]["f_sample"]
+            num_samples = cfg["dac"]["num_samples"]
+            siggen_addr = cfg["instruments"]["siggen_addr"]
+            sa_addr = cfg["instruments"]["sa_addr"]
+            siggen_level = _siggen_level_from_cfg(cfg)
+            port = args.port or cfg["hardware"]["port"]
+            baudrate = args.baudrate or cfg["hardware"]["baudrate"]
+            center_hz = args.center if args.center is not None else dac_clock_hz / 4
+            span_hz = args.span if args.span is not None else dac_clock_hz / 2
+            noise_bw_hz = args.noise_bw if args.noise_bw is not None else span_hz
+            points, excluded = _resolve_sweep_points(requested_targets, dac_clock_hz, num_samples)
+        if excluded:
+            print(f"[sweep] continuing with {len(points)} in-band point(s); skipped {len(excluded)} out-of-range target(s).")
+    if not points:
+        raise SystemExit("No alias-free sweep points remain. Increase f_sample and try again.")
     if persist_actuals:
         set_sweep_frequencies([point["tone_hz_actual"] for point in points])
         print(f"[sweep] frequencies updated in config ({len(points)} points).")
@@ -864,7 +1197,27 @@ def cmd_sa_comprehensive_sweep(args):
     output = Path(args.output) if args.output else Path("data/captures/sa_comprehensive_sweep.csv")
 
     requested_targets, persist_actuals = _requested_sweep_targets(args, cfg)
-    points = _resolve_sweep_points(requested_targets, dac_clock_hz, num_samples)
+    points, excluded = _resolve_sweep_points(requested_targets, dac_clock_hz, num_samples)
+    if excluded:
+        _summarize_out_of_range_targets(excluded, dac_clock_hz)
+        refreshed_cfg = _maybe_raise_sample_rate_for_sweep("sa-comprehensive-sweep", excluded, cfg)
+        if refreshed_cfg is not None:
+            cfg = refreshed_cfg
+            dac_clock_hz = cfg["dac"]["f_sample"]
+            num_samples = cfg["dac"]["num_samples"]
+            siggen_addr = cfg["instruments"]["siggen_addr"]
+            sa_addr = cfg["instruments"]["sa_addr"]
+            siggen_level = _siggen_level_from_cfg(cfg)
+            port = args.port or cfg["hardware"]["port"]
+            baudrate = args.baudrate or cfg["hardware"]["baudrate"]
+            center_hz = args.center if args.center is not None else dac_clock_hz / 4
+            span_hz = args.span if args.span is not None else dac_clock_hz / 2
+            noise_bw_hz = args.noise_bw if args.noise_bw is not None else span_hz
+            points, excluded = _resolve_sweep_points(requested_targets, dac_clock_hz, num_samples)
+        if excluded:
+            print(f"[sweep] continuing with {len(points)} in-band point(s); skipped {len(excluded)} out-of-range target(s).")
+    if not points:
+        raise SystemExit("No alias-free sweep points remain. Increase f_sample and try again.")
     if persist_actuals:
         set_sweep_frequencies([point["tone_hz_actual"] for point in points])
         print(f"[sweep] frequencies updated in config ({len(points)} points).")
@@ -993,12 +1346,18 @@ def build_parser():
     p.add_argument("--fs-app", type=float,
         metavar="HZ_APP",
         help="Override fs_app (maps to f_sample via fixed 2^20 scale)")
+    p.add_argument("--f-sample", type=float,
+        metavar="HZ",
+        help="Override f_sample directly (back-calculates fs_app and keeps config in sync)")
     p.add_argument("--x-seed", type=int,
         metavar="N",
         help="Override x_seed (prime bin search seed)")
+    p.add_argument("--f-out", type=float,
+        metavar="HZ",
+        help="Target output frequency; back-calculates x_seed/fin, then runs forward calc")
     p.add_argument("--from-fout", type=float,
         metavar="HZ",
-        help="Back-calculate x_seed/fin from a desired f_out, then run forward calc")
+        help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_calc)
 
     p = sub.add_parser("gen-sine")
@@ -1119,7 +1478,7 @@ def build_parser():
     p.add_argument("--freq-step", type=float, metavar="HZ",
         help="Step between target frequencies (Hz); actual steps quantized to prime bins")
     p.add_argument("--freqs", type=float, nargs="+", metavar="HZ",
-        help="Explicit list of target frequencies (Hz); snapped to coherent bins and saved to config")
+        help="Explicit list of target frequencies (Hz); edge-clipped when needed, out-of-range targets skipped, and coherent actuals saved to config")
     p.add_argument("--center", type=float, metavar="HZ",
         help="SA center frequency in Hz (default: f_sample/4 — Nyquist midpoint)")
     p.add_argument("--span", type=float, metavar="HZ",
@@ -1155,7 +1514,7 @@ def build_parser():
     p.add_argument("--freq-step", type=float, metavar="HZ",
         help="Step between target frequencies (Hz); actual steps quantized to prime bins")
     p.add_argument("--freqs", type=float, nargs="+", metavar="HZ",
-        help="Explicit list of target frequencies (Hz); snapped to coherent bins and saved to config")
+        help="Explicit list of target frequencies (Hz); edge-clipped when needed, out-of-range targets skipped, and coherent actuals saved to config")
     p.add_argument("--center", type=float, metavar="HZ",
         help="SA center frequency in Hz (default: f_sample/4 - Nyquist midpoint)")
     p.add_argument("--span", type=float, metavar="HZ",
@@ -1191,7 +1550,7 @@ def build_parser():
     p.add_argument("--freq-step", type=float, metavar="HZ",
         help="Step between target frequencies (Hz); actual steps quantized to in-band prime bins")
     p.add_argument("--freqs", type=float, nargs="+", metavar="HZ",
-        help="Explicit list of target frequencies (Hz); clipped to Nyquist, snapped to coherent bins, and saved to config")
+        help="Explicit list of target frequencies (Hz); edge-clipped when needed, out-of-range targets skipped, and coherent actuals saved to config")
     p.add_argument("--center", type=float, metavar="HZ",
         help="SA center frequency in Hz (default: f_sample/4 - Nyquist midpoint)")
     p.add_argument("--span", type=float, metavar="HZ",

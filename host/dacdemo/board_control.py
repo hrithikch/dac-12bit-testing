@@ -13,12 +13,14 @@ class BoardSession:
     ser: serial.Serial
 
     @classmethod
-    def open(cls, port: str, baudrate: int = 115200, startup_delay_s: float = 2.0, read_timeout_s: float = 5.0):
+    def open(cls, port: str, baudrate: int = 115200, startup_delay_s: float = 5.0, read_timeout_s: float = 5.0):
         ser = serial.Serial()
         ser.baudrate = baudrate
         ser.port = port
         ser.timeout = read_timeout_s
         ser.open()
+        # Native-USB SAMD boards can reset when the host opens the port.
+        # Give the sketch time to finish startup before the first command.
         time.sleep(startup_delay_s)
         ser.reset_input_buffer()
         ser.reset_output_buffer()

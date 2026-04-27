@@ -6,10 +6,10 @@ Bench control and signal generation for the DAC test board. One Arduino firmware
 
 ```
 config/                         TOML config (port, rail voltages, DAC params, instrument addresses)
-docs/                           quickstart.md, command_reference.md, setup_and_testing.md
+docs/                           quickstart.md, command_reference.md, measurement_calculations.md, sa_scpi_validated.md
 firmware/Arduino_DAC_framework/ Arduino firmware — flash once, leave in place
 host/                           Python package (dacdemo) and entry point
-instrument_comms/               Reusable instrument drivers (R&S siggen, Keysight scope, AD2, supplies)
+instrument_comms/               Reusable instrument drivers (R&S siggen, Keysight scope, AD3, supplies)
 legacy/                         Original sketches preserved for reference
 lib/Ina219Rails/                Arduino library source — copy to your Arduino libraries folder
 tools/                          Standalone utilities (capture_validate.py)
@@ -29,58 +29,38 @@ tools/                          Standalone utilities (capture_validate.py)
 - NI-VISA backend — required on Windows for pyvisa LAN instruments (download from ni.com/visa)
 - Digilent WaveForms — required for AD3 digital capture (installs `dwf.dll`)
 
+## Documentation
+
+- [`docs/quickstart.md`](docs/quickstart.md) — first-time setup, typical workflow, every CLI command with examples
+- [`docs/command_reference.md`](docs/command_reference.md) — complete flag listings, config ownership table, legacy migration guide
+- [`docs/measurement_calculations.md`](docs/measurement_calculations.md) — CSV schemas, formulas, and measurement methodology for all SA and scope paths
+- [`docs/sa_scpi_validated.md`](docs/sa_scpi_validated.md) — validated SCPI command sequences for the Keysight N9010B
+
 ## Setup
 
 ```bash
-# Install Python package (run once from repo root)
-pip install -e host/
-
-# Detect board port and save to config
-dacdemo detect-port
+pip install -e host/         # install Python package (once, from repo root)
+.venv\Scripts\activate       # activate venv
+dacdemo detect-port          # find board USB port, save to config
 ```
 
-Update instrument IP addresses in `config/dacdemo.toml` `[instruments]` before using `set-siggen`, `scope-measure`, or `sa-measure`.
+See `docs/quickstart.md` for the full bring-up sequence, including firmware flash, instrument detection, and the first sweep.
 
-See `docs/setup_and_testing.md` for firmware flash instructions and step-by-step bring-up.
+## Config files
 
-## Normal workflow
+`config/dacdemo.toml` is the main config file. Edit it before running commands:
 
-```bash
-# Compute coherent tone plan — derives f_sample and f_out, writes them to [dac] in config
-dacdemo calc
-
-# Push sample clock frequency to R&S SMA100B signal generator over LAN
-dacdemo set-siggen
-
-# Bias rails and enable DAC sine output
-dacdemo run-demo --initialize-compliance
-
-# Capture and decode SPI signals from ItsyBitsy via AD3 logic analyzer
-dacdemo capture
-
-# Measure DAC analog output via Keysight MSOS054A scope
-dacdemo scope-measure
-
-# Measure DAC RF output via Keysight N9010B EXA Signal Analyzer
-dacdemo sa-measure
-```
-
-See `docs/quickstart.md` for the full command sequence with short explanations.
-
-## Coherent tone config
-
-`[coherent_tone]` in `config/dacdemo.toml` is the source of truth for frequency planning.
-`[dac] f_sample` and `[dac] f_out` are always derived — run `dacdemo calc` after any change.
-
-| Key | Role |
+| Section | Purpose |
 |---|---|
-| `fs_app` | Sets sample clock: `f_sample = fs_app × 2^20` |
-| `x_seed` | Prime bin search seed → selects output frequency |
-| `fin` | `"low"` or `"high"` — which prime bin becomes `f_out` |
+| `[hardware]` | COM port (written by `detect-port`) and baud rate |
+| `[dac]` | `f_out` and `f_sample` — always written by `dacdemo calc`; do not edit by hand |
+| `[rails]` | Target rail voltages for `bias` / `run-demo` |
+| `[coherent_tone]` | Frequency planning inputs — edit `fs_app`, `x_seed`, or `fin`, then run `dacdemo calc` |
+| `[instruments]` | VISA addresses — run `dacdemo detect-instruments` to auto-fill, or set manually |
+| `[psu]` | Bench PSU channel, voltage, and current limit |
+| `[sweep]` | Active sweep file: `config = "default"` → `config/sweeps/default.toml` |
 
-```bash
-dacdemo calc --from-fout 61.44e6   # back-calculate x_seed + fin from a desired f_out
-```
+Sweep frequency lists live under `config/sweeps/`. Each file is a TOML with a `frequencies` array (Hz). Create named files for different test plans and switch between them by changing `[sweep] config` in `dacdemo.toml`.
 
 ## Serial commands (firmware)
 

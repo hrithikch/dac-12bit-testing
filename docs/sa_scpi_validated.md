@@ -87,6 +87,13 @@ Extra options available:
 |---|---|---|
 | `:TRACe:DATA? TRACe1` | `TRACe[:DATA]` | `[:DATA]` optional |
 
+The project's SNR flow is not backed by a native EXA `:MEASure:SNR?` command.
+It derives SNR in software from marker peak reads plus trace data:
+- `:CALCulate:MARKer1:MAXimum`
+- `:CALCulate:MARKer1:X?`
+- `:CALCulate:MARKer1:Y?`
+- `:TRACe:DATA? TRACe1`
+
 Extra options available:
 - `MMEMory:STORe:TRACe:DATA` — save trace data directly to a file on the instrument
 - `MMEMory:LOAD:TRACe:DATA` — load trace data from a file on the instrument

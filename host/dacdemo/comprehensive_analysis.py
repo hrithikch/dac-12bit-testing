@@ -35,11 +35,19 @@ def _peak_near_frequency(trace_dbm: list[float], freqs_hz: list[float], target_h
     return best_freq, best_amp
 
 
-def _find_worst_spur(trace_dbm: list[float], freqs_hz: list[float], fund_freq_hz: float, exclusion_hz: float) -> tuple[float, float]:
+def _find_worst_spur(
+    trace_dbm: list[float],
+    freqs_hz: list[float],
+    fund_freq_hz: float,
+    exclusion_hz: float,
+    dc_guard_hz: float = 0.0,
+) -> tuple[float, float]:
     best_amp = float("nan")
     best_freq = float("nan")
     for freq_hz, amp_dbm in zip(freqs_hz, trace_dbm):
         if not math.isfinite(amp_dbm):
+            continue
+        if abs(freq_hz) <= dc_guard_hz:
             continue
         if abs(freq_hz - fund_freq_hz) <= exclusion_hz:
             continue
@@ -67,6 +75,7 @@ def analyze_trace_metrics(
     bin_width_hz = span_hz / max(len(trace_dbm) - 1, 1)
     harmonic_tol_hz = max(3 * bin_width_hz, 2 * rbw_hz, dac_clock_hz / num_samples)
     exclusion_hz = max(3 * bin_width_hz, 2 * rbw_hz)
+    dc_guard_hz = exclusion_hz
 
     expected = expected_harmonics(fund_freq_hz, dac_clock_hz, orders=harmonic_orders)
     harmonic_results = {}
@@ -89,6 +98,7 @@ def analyze_trace_metrics(
         freqs_hz=freqs_hz,
         fund_freq_hz=fund_freq_hz,
         exclusion_hz=exclusion_hz,
+        dc_guard_hz=dc_guard_hz,
     )
     sfdr_dbc = fund_amp_dbm - spur_amp_dbm if math.isfinite(spur_amp_dbm) else float("nan")
     spur_class = classify_spur(

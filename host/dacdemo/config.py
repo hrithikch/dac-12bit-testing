@@ -127,6 +127,19 @@ def set_scope_addr(addr: str, path: Path = _DEFAULT_CONFIG_PATH) -> None:
     _log_config_write(path, {"scope_addr": repr(addr)}, label="instruments")
 
 
+def set_psu_addr(addr: str, path: Path = _DEFAULT_CONFIG_PATH) -> None:
+    """Replace psu_addr in [instruments] in-place, preserving all comments."""
+    text = path.read_text(encoding="utf-8")
+    updated = re.sub(
+        r'^(psu_addr\s*=\s*)".+"',
+        rf'\g<1>"{addr}"',
+        text,
+        flags=re.MULTILINE,
+    )
+    path.write_text(updated, encoding="utf-8")
+    _log_config_write(path, {"psu_addr": repr(addr)}, label="instruments")
+
+
 def set_sweep_frequencies(frequencies: list, path: Path = _DEFAULT_CONFIG_PATH) -> None:
     """Write frequencies to the currently active sweep config file."""
     with open(path, "rb") as f:

@@ -4,7 +4,26 @@ Activate the venv first: `.venv\Scripts\activate`
 
 ---
 
-## First time
+## Typical full sequence
+
+```bash
+# 1. edit config/dacdemo.toml (rails, instruments) and config/sweeps/<name>.toml (frequencies)
+# 2. choose the sample clock and output frequency
+dacdemo calc --fs-app 5000                # writes fs_app → f_sample, derives f_out from x_seed/fin
+
+# 3. prep the bench (detect-port + calc + flash + bias)
+dacdemo prep --initialize-compliance
+
+# 4. start the clock source
+dacdemo set-siggen
+
+# 5. run a sweep
+dacdemo sa-comprehensive-sweep --freqs 100e6 500e6 1e9 2e9 3e9 4e9
+```
+
+---
+
+## First-time setup
 
 **`dacdemo detect-port`**
 Scans USB, finds the Adafruit ItsyBitsy by VID, saves the COM port to `config/dacdemo.toml`. Re-run if you change USB ports.
@@ -12,27 +31,71 @@ Scans USB, finds the Adafruit ItsyBitsy by VID, saves the COM port to `config/da
 **`dacdemo flash`**
 Compiles and uploads the firmware. Uses port and board from config. Only needed on first setup or after firmware changes.
 
+**`dacdemo detect-instruments`**
+Finds the R&S SMA100B, Keysight EXA, oscilloscope, and PSU via VISA and writes their addresses directly to `config/dacdemo.toml`. Run once when setting up a bench, or any time an instrument changes IP address.
+```
+dacdemo detect-instruments                    # VISA only
+dacdemo detect-instruments --subnet 192.168.10  # also scan LAN
+```
+
 ---
 
-## Coherent tone setup (no hardware needed)
+## Config files
 
-**`dacdemo calc`**
+`config/dacdemo.toml` is the main config. Sections you'll edit:
+
+- `[coherent_tone]` — edit `fs_app`, `x_seed`, or `fin`, then run `dacdemo calc` to update `[dac]`
+- `[rails]` — target voltages sent by `bias` / `run-demo`
+- `[instruments]` — VISA addresses (written by `detect-instruments`, or set manually)
+- `[psu]` — PSU channel, voltage, and current limit
+- `[sweep]` — selects the active sweep file: `config = "default"` → `config/sweeps/default.toml`
+
+Do not edit `[dac]` by hand — `f_out` and `f_sample` are always written by `dacdemo calc`.
+
+Sweep frequency lists live in `config/sweeps/`. Each file is a TOML with a `frequencies` array in Hz. Create named files for different test plans; switch between them by changing `[sweep] config` in `dacdemo.toml`.
+
+---
+
+## Coherent tone setup
+
+### f_sample and f_out
+
+The two key DAC frequencies:
+- **`f_sample`** — sample clock in Hz, driven by the R&S siggen
+- **`f_out`** — output tone in Hz; must be a coherent fraction of `f_sample` (integer number of periods per 256-sample buffer)
+
+`dacdemo calc` resolves your request into the nearest valid coherent pair and saves the result to `[dac]`. All downstream commands (`set-siggen`, `run-demo`, sweeps) read exclusively from `[dac]`.
+
+```bash
+# Set f_sample via the app-clock divider (most common)
+dacdemo calc --fs-app 5000                          # f_sample = 5000 × 2^20 ≈ 5.24 GHz; f_out from x_seed/fin
+
+# Set f_out alone — back-calculates x_seed + fin for the nearest coherent bin
+dacdemo calc --f-out 100e6
+
+# Set f_sample directly — re-derives f_out from the current x_seed/fin
+dacdemo calc --f-sample 5.24288e9
+
+# Set both — snaps f_out to the coherent bin nearest your request
+dacdemo calc --f-sample 5.24288e9 --f-out 102.4e6
+
+# Change only the output frequency bin, keep current f_sample
+dacdemo calc --x-seed 7
+```
+
+### `dacdemo calc`
+
 Reads `[coherent_tone]` from config, derives `f_sample` and `f_out`, writes them back into `[dac]`.
 - `fs_app` → `f_sample = fs_app × 2^20`
 - `x_seed` → nearest prime bins → `f_out = chosen_bin × f_sample / num_samples`
 - `fin = "low"` or `"high"` selects which prime bin
 
-In this coherent-tone workflow, `num_samples` is fixed and `f_sample` is chosen first. That means each requested output tone is realized by choosing a coherent prime bin `k`, with `f_out = k × f_sample / num_samples`.
+In this coherent-tone workflow, `num_samples` is fixed and `f_sample` is chosen first. Each requested output tone is realized by choosing a coherent prime bin `k`, with `f_out = k × f_sample / num_samples`.
 
 Run this any time you change `fs_app`, `x_seed`, or `fin`. Everything downstream reads from `[dac]`.
 
-```
-dacdemo calc --x-seed 7         # change output frequency bin
-dacdemo calc --from-fout 61e6   # back-calculate x_seed + fin from a desired f_out
-dacdemo calc --fs-app 5000      # write fs_app, recompute f_sample + f_out in config
-```
+### `dacdemo gen-sine`
 
-**`dacdemo gen-sine`**
 Generates the 256-sample 12-bit sine table from `f_out` and `f_sample`, saves to `data/generated_patterns/`. Skippable — `play-sine` and `run-demo` do this internally.
 
 ---
@@ -50,7 +113,7 @@ dacdemo prep --initialize-compliance
 **`dacdemo legacy`** — runs the original two-sketch workflow end-to-end: detect → flash `legacy/sketch/Arduino_DAC_control_sketch/` → bias → pause for socket connection → flash `legacy/sketch/sine_din_h/`. Use `--no-prompt` to skip the pause.
 
 **`dacdemo bias`**
-Sends `SET_VOLTAGE` with all rail targets from `[rails]` in config. Reads back each voltage to confirm.
+First ensures the bench PSU channel from `[psu]` is enabled at the configured voltage/current limit, then sends `SET_VOLTAGE` with all rail targets from `[rails]` in config. Reads back each voltage to confirm.
 ```
 dacdemo bias --initialize-compliance   # reset current limits first (recommended)
 ```
@@ -69,11 +132,7 @@ dacdemo run-demo --initialize-compliance
 ## Instruments
 
 **`dacdemo detect-instruments`**
-Finds the R&S SMA100B signal generator, Keysight N9010B EXA signal analyzer, and Keysight oscilloscope via VISA, and writes their addresses directly to `config/dacdemo.toml`. Run once when setting up a new bench, or any time an instrument changes IP address.
-```
-dacdemo detect-instruments                    # VISA only
-dacdemo detect-instruments --subnet 192.168.10  # also scan LAN
-```
+See [First-time setup](#first-time-setup) above.
 
 **`dacdemo set-siggen`**
 Connects to the R&S SMA100B over LAN, sets CW mode, applies `f_sample` from `[dac]` as the DAC clock frequency, enables RF output.
@@ -154,17 +213,3 @@ dacdemo sa-comprehensive-sweep --freqs 100e6 500e6 1e9 2e9 3e9 4e9
 ```
 
 ---
-
-## Typical full sequence
-
-```bash
-# 1. edit config/dacdemo.toml or config/sweeps/<name>.toml
-# 2. choose the sample clock
-dacdemo calc --fs-app 5000                # example: writes fs_app, f_sample, and f_out to config
-
-# 3. prep the bench
-dacdemo prep --initialize-compliance      # detect port + calc + flash + bias
-
-# 4. run a sweep
-dacdemo sa-comprehensive-sweep --freqs 100e6 500e6 1e9 2e9 3e9 4e9
-```
