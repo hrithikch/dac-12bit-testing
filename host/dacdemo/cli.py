@@ -269,12 +269,32 @@ def cmd_detect_instruments(args):
                 result.append(inst)
         return result
 
-    def _pick(matches, display_name):
+    def _pick(matches, display_name, fallback=None):
         """Return chosen DiscoveredInstrument or None."""
         matches = _dedup(matches)
         if not matches:
-            print(f"  WARNING: no {display_name} found — skipping.")
-            return None
+            if not fallback:
+                print(f"  WARNING: no {display_name} found — skipping.")
+                return None
+            fallback = _dedup(fallback)
+            if not fallback:
+                print(f"  WARNING: no {display_name} found and no other instruments available — skipping.")
+                return None
+            print(f"\n  No recognized {display_name} found. Pick from all discovered instruments or skip:")
+            for i, inst in enumerate(fallback):
+                label = f"  {inst.label}" if inst.label else ""
+                print(f"    [{i + 1}] {_visa_addr(inst)}  —  {inst.idn}{label}")
+            print(f"    [0] Skip")
+            while True:
+                try:
+                    idx = int(input(f"  Select instrument number (0 to skip): "))
+                    if idx == 0:
+                        return None
+                    if 1 <= idx <= len(fallback):
+                        return fallback[idx - 1]
+                except (ValueError, KeyboardInterrupt):
+                    pass
+                print(f"  Please enter a number between 0 and {len(fallback)}.")
         if len(matches) == 1:
             return matches[0]
         print(f"\n  Multiple {display_name}s found:")
@@ -306,17 +326,20 @@ def cmd_detect_instruments(args):
             set_psu_addr,
         ),
         (
-            lambda inst: inst.label and ("MSO" in inst.label.upper() or "MXR" in inst.label.upper()),
+            lambda inst: inst.label and any(k in inst.label.upper() for k in ("MSO", "MXR", "UXR")),
             "Keysight oscilloscope",
             set_scope_addr,
         ),
     ]
 
+    all_visa_instruments = [inst for inst in all_results if inst.source != "AD2" and inst.idn]
+
     print()
     any_updated = False
     for match_fn, display_name, setter in targets:
         matches = [inst for inst in all_results if match_fn(inst)]
-        chosen = _pick(matches, display_name)
+        fallback = [inst for inst in all_visa_instruments if inst not in matches]
+        chosen = _pick(matches, display_name, fallback=fallback)
         if chosen is not None:
             addr = _visa_addr(chosen)
             setter(addr)

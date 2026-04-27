@@ -24,6 +24,7 @@ IDN_FINGERPRINTS = {
     # Keysight MSOS054A oscilloscope  →  KeysightOscilloscope driver
     "KEYSIGHT TECHNOLOGIES,MSOS":    "Keysight MSO oscilloscope",
     "KEYSIGHT TECHNOLOGIES,MXR":     "Keysight MXR oscilloscope",
+    "KEYSIGHT TECHNOLOGIES,UXR":     "Keysight UXR oscilloscope",
     # Keysight E36300-series power supply  →  KeysightPowerSupply driver
     "KEYSIGHT TECHNOLOGIES,E363":    "Keysight E363xx power supply",
     "KEYSIGHT TECHNOLOGIES,E364":    "Keysight E364xx power supply",
@@ -319,6 +320,7 @@ def print_results(all_instruments: list[DiscoveredInstrument]) -> None:
         "N9010B": "sa_addr",
         "MSO":    "scope_addr",
         "MXR":    "scope_addr",
+        "UXR":    "scope_addr",
         "SMA100": "siggen_addr",
         "E363":   "psu_addr",
         "E364":   "psu_addr",
